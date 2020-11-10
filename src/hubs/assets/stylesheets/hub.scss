@@ -1,0 +1,96 @@
+@import '../../react-components/styles/global.scss';
+
+@import 'loader';
+@import 'ui-root';
+@import 'exited';
+@import 'profile';
+@import 'entry';
+@import 'audio';
+@import 'info-dialog';
+
+:root {
+  // CSS vars for laying out side panels. Center canvas and UI are laid out in UIAnimationSystem
+  --nav-width: 300px;
+  --presence-width: 200px;
+}
+
+body {
+  background-color: #333;
+
+  a-scene {
+    height: 100%;
+    top: 0;
+    position: fixed;
+    z-index: 3;
+  }
+
+  #jel-popup-root {
+    position: absolute;
+    pointer-events: none;
+    width: 100%;
+    height: 100%;
+    top: 0;
+    left: 0;
+    z-index: 7;
+  }
+
+  #nav-drag-target {
+    position: absolute;
+    width: 16px;
+    left: calc(var(--nav-width) - 8px); 
+    top: 0;
+    z-index: 6;
+    height: 100%;
+    cursor: col-resize;
+  }
+
+  #presence-drag-target {
+    position: absolute;
+    width: 16px;
+    right: calc(var(--presence-width) - 8px); 
+    top: 0;
+    z-index: 6;
+    height: 100%;
+    cursor: col-resize;
+  }
+}
+
+body.vr-mode-stretch {
+  a-scene {
+    .a-canvas {
+      width: 200% !important;
+    }
+  }
+}
+
+.a-enter-vr, .a-orientation-modal {
+  display: none;
+}
+
+.grab-cursor {
+  cursor: grab;
+}
+
+.no-cursor {
+  cursor: none;
+}
+
+.webxr-realities, .webxr-sessions {
+  @extend %unselectable
+}
+
+// HACK: Deals with a performance regression in Chrome 75 where, once
+// enough elements are on the page, the Chrome "reader" functionality continually
+// scanning the page on mouse drag kills performance.
+
+a-entity {
+  display: none;
+}
+
+.svg-icon {
+  overflow: visible;
+  display: inline-block;
+  font-size: inherit;
+  vertical-align: -0.125em;
+  height: 1em;
+}
