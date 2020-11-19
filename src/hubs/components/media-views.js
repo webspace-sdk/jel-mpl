@@ -9,8 +9,8 @@ import {
   getNetworkedEntity
 } from "../../jel/utils/ownership-utils";
 import GIFWorker from "../workers/gifparsing.worker.js";
-import errorImageSrc from "!!url-loader!../assets/images/media-error.gif";
-import audioIcon from "../assets/images/audio.png";
+import errorImageSrc from "!!url-loader!../../assets/hubs/images/media-error.gif";
+import audioIcon from "../../assets/hubs/images/audio.png";
 import { paths } from "../systems/userinput/paths";
 import HLS from "hls.js";
 import { RENDER_ORDER } from "../constants";
@@ -1089,7 +1089,7 @@ AFRAME.registerComponent("media-video", {
     } else if (type === MEDIA_INTERACTION_TYPES.SNAPSHOT) {
       this.snap();
     } else if (type === MEDIA_INTERACTION_TYPES.OPEN) {
-      window.open(this.data.src);
+      window.open(this.el.components["media-loader"].data.src);
     }
   }
 });
@@ -1397,7 +1397,7 @@ AFRAME.registerComponent("media-image", {
 
   handleMediaInteraction(type) {
     if (type === MEDIA_INTERACTION_TYPES.OPEN) {
-      window.open(this.data.src);
+      window.open(this.el.components["media-loader"].data.src);
     }
   }
 });
@@ -1645,7 +1645,7 @@ AFRAME.registerComponent("media-pdf", {
     }
 
     if (type === MEDIA_INTERACTION_TYPES.OPEN) {
-      window.open(this.data.src);
+      window.open(this.el.components["media-loader"].data.src);
       return;
     }
 

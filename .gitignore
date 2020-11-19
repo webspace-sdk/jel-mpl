@@ -66,3 +66,4 @@ certs/
 results/
 .ret.credentials
 src/jel/*
+src/assets/jel/*
