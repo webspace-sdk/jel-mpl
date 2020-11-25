@@ -5,8 +5,9 @@ import nextTick from "./next-tick";
 import { authorizeOrSanitizeMessage } from "./permissions-utils";
 import { isSetEqual } from "../../jel/utils/set-utils";
 import { homeHubForSpaceId } from "../../jel/utils/membership-utils";
+import { clearResolveUrlCache } from "./media-utils";
 import qsTruthy from "./qs_truthy";
-//import { getReticulumMeta, invalidateReticulumMeta, connectToReticulum } from "./phoenix-utils";
+import { getReticulumMeta, invalidateReticulumMeta, connectToReticulum } from "./phoenix-utils";
 import HubStore from "../storage/hub-store";
 
 const PHOENIX_RELIABLE_NAF = "phx-reliable";
@@ -16,10 +17,10 @@ const isDebug = qsTruthy("debug");
 const isMobile = AFRAME.utils.device.isMobile();
 const isMobileVR = AFRAME.utils.device.isMobileVR();
 
-//let retDeployReconnectInterval;
+let dynaDeployReconnectInterval;
 let positionTrackerInterval = null;
 
-//const retReconnectMaxDelayMs = 15000;
+const dynaReconnectMaxDelayMs = 15000;
 const stopTrackingPosition = () => clearInterval(positionTrackerInterval);
 
 const startTrackingPosition = (() => {
@@ -93,10 +94,7 @@ async function moveToInitialHubLocation(hub, hubStore) {
 const createDynaChannelParams = () => {
   const store = window.APP.store;
 
-  const params = {
-    auth_token: null,
-    perms_token: null
-  };
+  const params = {};
 
   const { token } = store.state.credentials;
   if (token) {
@@ -145,49 +143,48 @@ const createHubChannelParams = () => {
   return params;
 };
 
-// TODO JEL
-//const migrateToNewReticulumServer = async deployNotification => {
-//  const { authChannel, linkChannel, hubChannel, retChannel, spaceChannel } = window.APP;
-//
-//  // On Reticulum deploys, reconnect after a random delay until pool + version match deployed version/pool
-//  console.log(`Reticulum deploy detected v${deployNotification.ret_version} on ${deployNotification.ret_pool}`);
-//  clearInterval(retDeployReconnectInterval);
-//
-//  await new Promise(res => {
-//    setTimeout(() => {
-//      const tryReconnect = async () => {
-//        invalidateReticulumMeta();
-//        const reticulumMeta = await getReticulumMeta();
-//
-//        if (
-//          reticulumMeta.pool === deployNotification.ret_pool &&
-//          reticulumMeta.version === deployNotification.ret_version
-//        ) {
-//          console.log("Reticulum reconnecting.");
-//          clearInterval(retDeployReconnectInterval);
-//          const oldSocket = retChannel.channel.socket;
-//          const socket = await connectToReticulum(isDebug, oldSocket.params());
-//          await retChannel.migrateToSocket(socket, createDynaChannelParams());
-//          await spaceChannel.migrateToSocket(socket, createSpaceChannelParams());
-//          await hubChannel.migrateToSocket(socket, createHubChannelParams());
-//          authChannel.setSocket(socket);
-//          linkChannel.setSocket(socket);
-//
-//          // Disconnect old socket after a delay to ensure this user is always registered in presence.
-//          setTimeout(() => {
-//            console.log("Reconnection complete. Disconnecting old reticulum socket.");
-//            oldSocket.teardown();
-//          }, 10000);
-//
-//          res();
-//        }
-//      };
-//
-//      retDeployReconnectInterval = setInterval(tryReconnect, 5000);
-//      tryReconnect();
-//    }, Math.floor(Math.random() * retReconnectMaxDelayMs));
-//  });
-//};
+const migrateToNewDynaServer = async deployNotification => {
+  const { authChannel, linkChannel, hubChannel, dynaChannel, spaceChannel } = window.APP;
+
+  // On Reticulum deploys, reconnect after a random delay until pool + version match deployed version/pool
+  console.log(`Dyna deploy detected on ${deployNotification.dyna_pool}`);
+  clearInterval(dynaDeployReconnectInterval);
+
+  await new Promise(res => {
+    setTimeout(() => {
+      const tryReconnect = async () => {
+        invalidateReticulumMeta();
+        const reticulumMeta = await getReticulumMeta();
+
+        if (
+          reticulumMeta.pool === deployNotification.dyna_pool &&
+          reticulumMeta.version === deployNotification.dyna_version
+        ) {
+          console.log("Dyna reconnecting.");
+          clearInterval(dynaDeployReconnectInterval);
+          const oldSocket = dynaChannel.channel.socket;
+          const socket = await connectToReticulum(isDebug, oldSocket.params());
+          await dynaChannel.migrateToSocket(socket, createDynaChannelParams());
+          await spaceChannel.migrateToSocket(socket, createSpaceChannelParams());
+          await hubChannel.migrateToSocket(socket, createHubChannelParams());
+          authChannel.setSocket(socket);
+          linkChannel.setSocket(socket);
+
+          // Disconnect old socket after a delay to ensure this user is always registered in presence.
+          setTimeout(() => {
+            console.log("Reconnection complete. Disconnecting old dyna socket.");
+            oldSocket.teardown();
+          }, 10000);
+
+          res();
+        }
+      };
+
+      dynaDeployReconnectInterval = setInterval(tryReconnect, 5000);
+      tryReconnect();
+    }, Math.floor(Math.random() * dynaReconnectMaxDelayMs));
+  });
+};
 
 function updateUIForHub(hub, hubChannel, remountUI, remountJelUI) {
   const scene = document.querySelector("a-scene");
@@ -351,9 +348,9 @@ const joinSpaceChannel = async (
 
         isInitialJoin = false;
 
-        const { xana_host, arpa_host, turn } = data.spaces[0];
+        const { xana_host, turn } = data.spaces[0];
 
-        const setupAdapter = () => {
+        const setupNAFAdapter = () => {
           const adapter = NAF.connection.adapter;
 
           if (!adapter.reliableTransport) {
@@ -364,66 +361,80 @@ const joinSpaceChannel = async (
 
           setupPeerConnectionConfig(adapter, xana_host, turn);
 
-          let newHostPollInterval = null;
+          let newXanaHostPollInterval = null;
 
           // When reconnecting, update the server URL if necessary
           adapter.setReconnectionListeners(
             () => {
-              if (newHostPollInterval) return;
+              if (newXanaHostPollInterval) return;
 
-              newHostPollInterval = setInterval(async () => {
-                const { xana_host, xana_port, arpa_host, arpa_port, turn } = await spaceChannel.getHosts();
+              newXanaHostPollInterval = setInterval(async () => {
+                const { xana_host, xana_port } = await spaceChannel.getHosts();
 
-                const currentXanaURL = NAF.connection.adapter.serverUrl;
-                const currentArpaURL = SAF.connection.adapter.serverUrl;
+                const currentXanaURL = adapter.getServerUrl();
                 const newXanaURL = `wss://${xana_host}:${xana_port}`;
-                const newArpaURL = `wss://${arpa_host}:${arpa_port}`;
 
                 setupPeerConnectionConfig(adapter, xana_host, turn);
 
                 if (currentXanaURL !== newXanaURL) {
-                  // TODO JEL test coordinated reconnect
+                  console.log(`Updated Xana Host: ${newXanaURL}`);
                   scene.setAttribute("networked-scene", { serverURL: newXanaURL });
-                  adapter.serverUrl = newXanaURL;
-                  //NAF.connection.adapter.joinHub(currentHub); // TODO JEL RECONNECT
-                }
-
-                if (currentArpaURL !== newArpaURL) {
-                  // TODO JEL test coordinated reconnect
-                  scene.setAttribute("shared-scene", { serverURL: newArpaURL });
-                  adapter.serverUrl = newArpaURL;
-                  //NAF.connection.adapter.joinHub(currentHub); // TODO JEL RECONNECT
+                  adapter.setServerUrl(newXanaURL);
                 }
               }, 1000);
             },
             () => {
-              clearInterval(newHostPollInterval);
-              newHostPollInterval = null;
+              clearInterval(newXanaHostPollInterval);
+              newXanaHostPollInterval = null;
             },
             () => {
-              clearInterval(newHostPollInterval);
-              newHostPollInterval = null;
+              clearInterval(newXanaHostPollInterval);
+              newXanaHostPollInterval = null;
+            }
+          );
+        };
+
+        const setupSAFAdapter = () => {
+          SAF.connection.adapter.setClientId(socket.params().session_id);
+          const adapter = SAF.connection.adapter;
+
+          let newArpaHostPollInterval = null;
+
+          // When reconnecting, update the server URL if necessary
+          adapter.setReconnectionListeners(
+            () => {
+              if (newArpaHostPollInterval) return;
+
+              newArpaHostPollInterval = setInterval(async () => {
+                const { arpa_host, arpa_port } = await spaceChannel.getHosts();
+
+                const currentArpaURL = adapter.getServerUrl();
+                const newArpaURL = `wss://${arpa_host}:${arpa_port}`;
+
+                if (currentArpaURL !== newArpaURL) {
+                  console.log(`Updated Arpa Host: ${newArpaURL}`);
+                  scene.setAttribute("shared-scene", { serverURL: newArpaURL });
+                  adapter.setServerUrl(newArpaURL);
+                }
+              }, 1000);
+            },
+            () => {
+              clearInterval(newArpaHostPollInterval);
+              newArpaHostPollInterval = null;
             }
           );
         };
 
         if (NAF.connection.adapter) {
-          setupAdapter();
+          setupNAFAdapter();
         } else {
-          scene.addEventListener("adapter-ready", setupAdapter, { once: true });
+          scene.addEventListener("adapter-ready", setupNAFAdapter, { once: true });
         }
 
         if (SAF.connection.adapter) {
-          SAF.connection.adapter.setClientId(socket.params().session_id);
+          setupSAFAdapter();
         } else {
-          scene.addEventListener(
-            "shared-adapter-ready",
-            async ({ detail: adapter }) => {
-              // TODO JEL this may not be needed once sharedb moves to dyna
-              adapter.setClientId(socket.params().session_id);
-            },
-            { once: true }
-          );
+          scene.addEventListener("shared-adapter-ready", setupSAFAdapter, { once: true });
         }
 
         await presenceInitPromise;
@@ -459,7 +470,7 @@ const joinSpaceChannel = async (
 
         const connectionErrorTimeout = setTimeout(() => {
           console.error("Unknown error occurred while attempting to connect to networked scene.");
-          remountUI({ roomUnavailableReason: "connect_error" });
+          remountJelUI({ unavailableReason: "connect_error" });
           entryManager.exitScene();
         }, 90000);
 
@@ -481,7 +492,7 @@ const joinSpaceChannel = async (
             // hacky until we get return codes
             const isFull = connectError.msg && connectError.msg.match(/\bfull\b/i);
             console.error(connectError);
-            remountUI({ roomUnavailableReason: isFull ? "full" : "connect_error" });
+            remountJelUI({ unavailableReason: isFull ? "full" : "connect_error" });
             entryManager.exitScene();
             joinFinished();
           });
@@ -489,13 +500,10 @@ const joinSpaceChannel = async (
       .receive("error", res => {
         if (res.reason === "closed") {
           entryManager.exitScene();
-          remountUI({ roomUnavailableReason: "closed" });
-        } else if (res.reason === "oauth_required") {
-          entryManager.exitScene();
-          remountUI({ oauthInfo: res.oauth_info, showOAuthDialog: true });
+          remountJelUI({ unavailableReason: "closed" });
         } else if (res.reason === "join_denied") {
           entryManager.exitScene();
-          remountUI({ roomUnavailableReason: "denied" });
+          remountJelUI({ unavailableReason: "denied" });
         }
 
         console.error(res);
@@ -588,6 +596,7 @@ const joinHubChannel = async (hubPhxChannel, hubStore, entryManager, remountUI, 
 
           if (isInitialJoin) {
             THREE.Cache.clear();
+            clearResolveUrlCache();
 
             moveToInitialHubLocation(hub, hubStore);
 
@@ -604,13 +613,10 @@ const joinHubChannel = async (hubPhxChannel, hubStore, entryManager, remountUI, 
       .receive("error", res => {
         if (res.reason === "closed") {
           entryManager.exitScene();
-          remountUI({ roomUnavailableReason: "closed" });
-        } else if (res.reason === "oauth_required") {
-          entryManager.exitScene();
-          remountUI({ oauthInfo: res.oauth_info, showOAuthDialog: true });
+          remountJelUI({ unavailableReason: "closed" });
         } else if (res.reason === "join_denied") {
           entryManager.exitScene();
-          remountUI({ roomUnavailableReason: "denied" });
+          remountJelUI({ unavailableReason: "denied" });
         }
 
         joinFinished();
@@ -753,6 +759,13 @@ export function joinSpace(
   const dynaPhxChannel = socket.channel(`dyna`, createDynaChannelParams());
   dynaPhxChannel.join().receive("error", res => console.error(res));
   dynaChannel.bind(dynaPhxChannel);
+  dynaPhxChannel.on("notice", async data => {
+    // On dyna deploys, reconnect after a random delay until pool + version match deployed version/pool
+    if (data.event === "dyna-deploy") {
+      await migrateToNewDynaServer(data);
+    }
+  });
+
   spaceMetadata.bind(dynaChannel);
 
   const spacePhxChannel = socket.channel(`space:${spaceId}`, createSpaceChannelParams());

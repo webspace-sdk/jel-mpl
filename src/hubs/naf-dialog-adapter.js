@@ -61,6 +61,12 @@ export default class DialogAdapter {
     this._visemeMap = new Map();
     this._reconnecting = false;
     this._transportCleanupTimeout = null;
+    this._closed = true;
+    this._creatingSendTransportPromise = null;
+    this._creatingRecvTransportPromise = null;
+    this._createMissingProducersPromise = null;
+    this._sendTransport = null;
+    this._recvTransport = null;
     this.type = "dialog";
     this.occupants = {}; // This is a public field
   }
@@ -78,7 +84,18 @@ export default class DialogAdapter {
     this._forceTcp = forceTcp;
   }
 
+  getServerUrl() {
+    return this._serverUrl;
+  }
+
   setServerUrl(url) {
+    if (this._protoo) {
+      const urlWithParams = new URL(url);
+      urlWithParams.searchParams.append("roomId", this._roomId);
+      urlWithParams.searchParams.append("peerId", this._clientId);
+      this._protoo._transport._url = urlWithParams.toString();
+    }
+
     this._serverUrl = url;
   }
 
@@ -134,11 +151,26 @@ export default class DialogAdapter {
     urlWithParams.searchParams.append("roomId", this._roomId);
     urlWithParams.searchParams.append("peerId", this._clientId);
 
-    const protooTransport = new protooClient.WebSocketTransport(urlWithParams.toString());
+    const protooTransport = new protooClient.WebSocketTransport(urlWithParams.toString(), {
+      retry: {
+        factor: 2,
+        minTimeout: 1 * 1000,
+        maxTimeout: 8 * 1000,
+        retries: 100000
+      }
+    });
     this._protoo = new protooClient.Peer(protooTransport);
 
     await new Promise(res => {
       this._protoo.on("open", async () => {
+        if (this._reconnecting) {
+          this._reconnecting = false;
+
+          if (this._reconnectedListener) {
+            this._reconnectedListener();
+          }
+        }
+
         this._closed = false;
         await this._joinRoom();
 
@@ -150,9 +182,27 @@ export default class DialogAdapter {
       });
     });
 
-    this._protoo.on("close", () => this.disconnect());
+    this._protoo.on("close", () => {
+      if (this._reconnecting) {
+        this._reconnecting = false;
+
+        if (this._reconnectionErrorListener) {
+          this._reconnectionErrorListener(
+            new Error("Connection could not be reestablished, exceeded maximum number of reconnection attempts.")
+          );
+        }
+      }
+
+      this.disconnect();
+    });
 
     this._protoo.on("disconnected", () => {
+      this._reconnecting = true;
+
+      if (this._reconnectingListener) {
+        this._reconnectingListener(this.reconnectionDelay);
+      }
+
       if (this._sendTransport) {
         this._sendTransport.close();
         this._sendTransport = null;
@@ -520,100 +570,124 @@ export default class DialogAdapter {
     return this.createMissingProducers(stream);
   }
 
-  async ensureSendTransport() {
+  ensureSendTransport() {
     if (this._closed || this._sendTransport) return;
 
-    // Create mediasoup Transport for sending (unless we don't want to produce).
-    const sendTransportInfo = await this._protoo.request("createWebRtcTransport", {
-      forceTcp: this._forceTcp,
-      producing: true,
-      consuming: false,
-      sctpCapabilities: undefined
-    });
+    if (!this._creatingSendTransportPromise) {
+      this._creatingSendTransportPromise = new Promise(res => {
+        // Create mediasoup Transport for sending (unless we don't want to produce).
+        this._protoo
+          .request("createWebRtcTransport", {
+            forceTcp: this._forceTcp,
+            producing: true,
+            consuming: false,
+            sctpCapabilities: undefined
+          })
+          .then(sendTransportInfo => {
+            this._sendTransport = this._mediasoupDevice.createSendTransport({
+              id: sendTransportInfo.id,
+              iceParameters: sendTransportInfo.iceParameters,
+              iceCandidates: sendTransportInfo.iceCandidates,
+              dtlsParameters: sendTransportInfo.dtlsParameters,
+              sctpParameters: sendTransportInfo.sctpParameters,
+              iceServers: this._iceServers,
+              iceTransportPolicy: this._iceTransportPolicy,
+              proprietaryConstraints: PC_PROPRIETARY_CONSTRAINTS,
+              additionalSettings: { encodedInsertableStreams: supportsInsertableStreams }
+            });
 
-    this._sendTransport = this._mediasoupDevice.createSendTransport({
-      id: sendTransportInfo.id,
-      iceParameters: sendTransportInfo.iceParameters,
-      iceCandidates: sendTransportInfo.iceCandidates,
-      dtlsParameters: sendTransportInfo.dtlsParameters,
-      sctpParameters: sendTransportInfo.sctpParameters,
-      iceServers: this._iceServers,
-      iceTransportPolicy: this._iceTransportPolicy,
-      proprietaryConstraints: PC_PROPRIETARY_CONSTRAINTS,
-      additionalSettings: { encodedInsertableStreams: supportsInsertableStreams }
-    });
+            this._sendTransport.on("connect", (
+              { dtlsParameters },
+              callback,
+              errback // eslint-disable-line no-shadow
+            ) => {
+              this._protoo
+                .request("connectWebRtcTransport", {
+                  transportId: this._sendTransport.id,
+                  dtlsParameters
+                })
+                .then(callback)
+                .catch(errback);
+            });
 
-    this._sendTransport.on("connect", (
-      { dtlsParameters },
-      callback,
-      errback // eslint-disable-line no-shadow
-    ) => {
-      this._protoo
-        .request("connectWebRtcTransport", {
-          transportId: this._sendTransport.id,
-          dtlsParameters
-        })
-        .then(callback)
-        .catch(errback);
-    });
+            this._sendTransport.on("connectionstatechange", state => {
+              if (state === "connected" && this._localMediaStream) {
+                this.createMissingProducers(this._localMediaStream);
+              }
+            });
 
-    this._sendTransport.on("connectionstatechange", state => {
-      if (state === "connected" && this._localMediaStream && !this._isSyncingProducers) {
-        this.createMissingProducers(this._localMediaStream);
-      }
-    });
+            this._sendTransport.on("produce", async ({ kind, rtpParameters, appData }, callback, errback) => {
+              try {
+                // eslint-disable-next-line no-shadow
+                const { id } = await this._protoo.request("produce", {
+                  transportId: this._sendTransport.id,
+                  kind,
+                  rtpParameters,
+                  appData
+                });
 
-    this._sendTransport.on("produce", async ({ kind, rtpParameters, appData }, callback, errback) => {
-      try {
-        // eslint-disable-next-line no-shadow
-        const { id } = await this._protoo.request("produce", {
-          transportId: this._sendTransport.id,
-          kind,
-          rtpParameters,
-          appData
-        });
+                callback({ id });
+              } catch (error) {
+                errback(error);
+              }
+            });
 
-        callback({ id });
-      } catch (error) {
-        errback(error);
-      }
-    });
+            this._creatingSendTransportPromise = null;
+
+            res();
+          });
+      });
+    }
+
+    return this._creatingSendTransportPromise;
   }
 
   async ensureRecvTransport() {
     if (this._closed || this._recvTransport) return;
 
-    // Create mediasoup Transport for sending (unless we don't want to consume).
-    const recvTransportInfo = await this._protoo.request("createWebRtcTransport", {
-      forceTcp: this._forceTcp,
-      producing: false,
-      consuming: true,
-      sctpCapabilities: undefined
-    });
+    if (!this._creatingRecvTransportPromise) {
+      // Create mediasoup Transport for receiving
+      this._creatingRecvTransportPromise = new Promise(res => {
+        this._protoo
+          .request("createWebRtcTransport", {
+            forceTcp: this._forceTcp,
+            producing: false,
+            consuming: true,
+            sctpCapabilities: undefined
+          })
+          .then(recvTransportInfo => {
+            this._recvTransport = this._mediasoupDevice.createRecvTransport({
+              id: recvTransportInfo.id,
+              iceParameters: recvTransportInfo.iceParameters,
+              iceCandidates: recvTransportInfo.iceCandidates,
+              dtlsParameters: recvTransportInfo.dtlsParameters,
+              sctpParameters: recvTransportInfo.sctpParameters,
+              iceServers: this._iceServers,
+              additionalSettings: { encodedInsertableStreams: supportsInsertableStreams }
+            });
 
-    this._recvTransport = this._mediasoupDevice.createRecvTransport({
-      id: recvTransportInfo.id,
-      iceParameters: recvTransportInfo.iceParameters,
-      iceCandidates: recvTransportInfo.iceCandidates,
-      dtlsParameters: recvTransportInfo.dtlsParameters,
-      sctpParameters: recvTransportInfo.sctpParameters,
-      iceServers: this._iceServers,
-      additionalSettings: { encodedInsertableStreams: supportsInsertableStreams }
-    });
+            this._recvTransport.on("connect", (
+              { dtlsParameters },
+              callback,
+              errback // eslint-disable-line no-shadow
+            ) => {
+              this._protoo
+                .request("connectWebRtcTransport", {
+                  transportId: this._recvTransport.id,
+                  dtlsParameters
+                })
+                .then(callback)
+                .catch(errback);
+            });
 
-    this._recvTransport.on("connect", (
-      { dtlsParameters },
-      callback,
-      errback // eslint-disable-line no-shadow
-    ) => {
-      this._protoo
-        .request("connectWebRtcTransport", {
-          transportId: this._recvTransport.id,
-          dtlsParameters
-        })
-        .then(callback)
-        .catch(errback);
-    });
+            this._creatingRecvTransportPromise = null;
+
+            res();
+          });
+      });
+    }
+
+    return this._creatingRecvTransportPromise;
   }
 
   async closeUnneededTransports() {
@@ -645,129 +719,133 @@ export default class DialogAdapter {
 
   async createMissingProducers(stream) {
     if (this._closed) return;
-    this._isSyncingProducers = true;
 
-    let sawAudio = false;
-    let sawVideo = false;
+    if (!this._createMissingProducersPromise) {
+      this._createMissingProducersPromise = new Promise(res => {
+        let sawAudio = false;
+        let sawVideo = false;
 
-    await Promise.all(
-      stream.getTracks().map(async track => {
-        if (track.kind === "audio") {
-          sawAudio = true;
+        Promise.all(
+          stream.getTracks().map(async track => {
+            if (track.kind === "audio") {
+              sawAudio = true;
 
-          // TODO multiple audio tracks?
-          if (this._micProducer) {
-            if (this._micProducer.track !== track) {
-              this._micProducer.track.stop();
-              this._micProducer.replaceTrack(track);
-            }
-          } else {
-            track.enabled = this._micEnabled;
-            await this.ensureSendTransport();
-
-            // stopTracks = false because otherwise the track will end during a temporary disconnect
-            this._micProducer = await this._sendTransport.produce({
-              track,
-              stopTracks: false,
-              codecOptions: { opusStereo: false, opusDtx: true }
-            });
-
-            if (supportsInsertableStreams) {
-              const self = this;
-
-              // Add viseme encoder
-              const senderTransform = new TransformStream({
-                start() {
-                  // Called on startup.
-                },
-
-                async transform(encodedFrame, controller) {
-                  if (encodedFrame.data.byteLength < 2) {
-                    controller.enqueue(encodedFrame);
-                    return;
-                  }
-
-                  // Create a new buffer with 1 byte for viseme.
-                  const newData = new ArrayBuffer(encodedFrame.data.byteLength + 1 + visemeMagicBytes.length);
-                  const arr = new Uint8Array(newData);
-                  arr.set(new Uint8Array(encodedFrame.data), 0);
-
-                  for (let i = 0, l = visemeMagicBytes.length; i < l; i++) {
-                    arr[encodedFrame.data.byteLength + i] = visemeMagicBytes[i];
-                  }
-
-                  if (self._outgoingVisemeBuffer) {
-                    const viseme = self._micEnabled ? self._outgoingVisemeBuffer[0] : 0;
-                    arr[encodedFrame.data.byteLength + visemeMagicBytes.length] = viseme;
-                    self._visemeMap.set(self._clientId, viseme);
-                  }
-
-                  encodedFrame.data = newData;
-                  controller.enqueue(encodedFrame);
-                },
-
-                flush() {
-                  // Called when the stream is about to be closed.
+              // TODO multiple audio tracks?
+              if (this._micProducer) {
+                if (this._micProducer.track !== track) {
+                  this._micProducer.track.stop();
+                  this._micProducer.replaceTrack(track);
                 }
-              });
+              } else {
+                track.enabled = this._micEnabled;
+                await this.ensureSendTransport();
 
-              const senderStreams = this._micProducer.rtpSender.createEncodedStreams();
-              senderStreams.readable.pipeThrough(senderTransform).pipeTo(senderStreams.writable);
+                // stopTracks = false because otherwise the track will end during a temporary disconnect
+                this._micProducer = await this._sendTransport.produce({
+                  track,
+                  stopTracks: false,
+                  codecOptions: { opusStereo: false, opusDtx: true }
+                });
+
+                if (supportsInsertableStreams) {
+                  const self = this;
+
+                  // Add viseme encoder
+                  const senderTransform = new TransformStream({
+                    start() {
+                      // Called on startup.
+                    },
+
+                    async transform(encodedFrame, controller) {
+                      if (encodedFrame.data.byteLength < 2) {
+                        controller.enqueue(encodedFrame);
+                        return;
+                      }
+
+                      // Create a new buffer with 1 byte for viseme.
+                      const newData = new ArrayBuffer(encodedFrame.data.byteLength + 1 + visemeMagicBytes.length);
+                      const arr = new Uint8Array(newData);
+                      arr.set(new Uint8Array(encodedFrame.data), 0);
+
+                      for (let i = 0, l = visemeMagicBytes.length; i < l; i++) {
+                        arr[encodedFrame.data.byteLength + i] = visemeMagicBytes[i];
+                      }
+
+                      if (self._outgoingVisemeBuffer) {
+                        const viseme = self._micEnabled ? self._outgoingVisemeBuffer[0] : 0;
+                        arr[encodedFrame.data.byteLength + visemeMagicBytes.length] = viseme;
+                        self._visemeMap.set(self._clientId, viseme);
+                      }
+
+                      encodedFrame.data = newData;
+                      controller.enqueue(encodedFrame);
+                    },
+
+                    flush() {
+                      // Called when the stream is about to be closed.
+                    }
+                  });
+
+                  const senderStreams = this._micProducer.rtpSender.createEncodedStreams();
+                  senderStreams.readable.pipeThrough(senderTransform).pipeTo(senderStreams.writable);
+                }
+
+                this._micProducer.on("transportclose", () => (this._micProducer = null));
+
+                if (!this._micEnabled && !this._micProducer.paused) {
+                  this._micProducer.pause();
+                } else if (this._micEnabled && this._micProducer.paused) {
+                  this._micProducer.resume();
+                }
+              }
+            } else {
+              sawVideo = true;
+
+              if (this._videoProducer) {
+                if (this._videoProducer.track !== track) {
+                  this._videoProducer.track.stop();
+                  this._videoProducer.replaceTrack(track);
+                }
+              } else {
+                await this.ensureSendTransport();
+
+                // stopTracks = false because otherwise the track will end during a temporary disconnect
+                this._videoProducer = await this._sendTransport.produce({
+                  track,
+                  stopTracks: false,
+                  codecOptions: { videoGoogleStartBitrate: 1000 }
+                });
+
+                this._videoProducer.on("transportclose", () => (this._videoProducer = null));
+              }
             }
 
-            this._micProducer.on("transportclose", () => (this._micProducer = null));
-
-            if (!this._micEnabled && !this._micProducer.paused) {
-              this._micProducer.pause();
-            } else if (this._micEnabled && this._micProducer.paused) {
-              this._micProducer.resume();
-            }
+            this.resolvePendingMediaRequestForTrack(this._clientId, track);
+          })
+        ).then(() => {
+          if (!sawAudio && this._micProducer) {
+            this._micProducer.close();
+            this._protoo.request("closeProducer", { producerId: this._micProducer.id });
+            this._micProducer = null;
           }
-        } else {
-          sawVideo = true;
 
-          if (this._videoProducer) {
-            if (this._videoProducer.track !== track) {
-              this._videoProducer.track.stop();
-              this._videoProducer.replaceTrack(track);
-            }
-          } else {
-            await this.ensureSendTransport();
-
-            // stopTracks = false because otherwise the track will end during a temporary disconnect
-            this._videoProducer = await this._sendTransport.produce({
-              track,
-              stopTracks: false,
-              codecOptions: { videoGoogleStartBitrate: 1000 }
-            });
-
-            this._videoProducer.on("transportclose", () => (this._videoProducer = null));
+          if (!sawVideo && this._videoProducer) {
+            this._videoProducer.close();
+            this._protoo.request("closeProducer", { producerId: this._videoProducer.id });
+            this._videoProducer = null;
           }
-        }
 
-        this.resolvePendingMediaRequestForTrack(this._clientId, track);
-      })
-    );
-
-    if (!sawAudio && this._micProducer) {
-      this._micProducer.close();
-      this._protoo.request("closeProducer", { producerId: this._micProducer.id });
-      this._micProducer = null;
+          this._localMediaStream = stream;
+          this._createMissingProducersPromise = null;
+          res();
+        });
+      });
     }
-
-    if (!sawVideo && this._videoProducer) {
-      this._videoProducer.close();
-      this._protoo.request("closeProducer", { producerId: this._videoProducer.id });
-      this._videoProducer = null;
-    }
-
-    this._localMediaStream = stream;
-    this._isSyncingProducers = false;
   }
 
-  enableMicrophone(enabled) {
+  async enableMicrophone(enabled) {
     if (enabled && this._localMediaStream && !this._micProducer) {
-      this.createMissingProducers(this._localMediaStream);
+      await this.createMissingProducers(this._localMediaStream);
     }
 
     clearTimeout(this._transportCleanupTimeout);
@@ -842,48 +920,6 @@ export default class DialogAdapter {
       this._recvTransport.close();
       this._recvTransport = null;
     }
-  }
-
-  reconnect() {
-    // Dispose of all networked entities and other resources tied to the session.
-    this._reconnecting = true;
-    this.disconnect();
-
-    return new Promise(res => {
-      this.connect()
-        .then(() => {
-          this._reconnecting = false;
-          this.reconnectionDelay = this.initialReconnectionDelay;
-          this.reconnectionAttempts = 0;
-
-          if (this._reconnectedListener) {
-            this._reconnectedListener();
-          }
-
-          res();
-        })
-        .catch(error => {
-          this.reconnectionDelay += 1000;
-          this.reconnectionAttempts++;
-
-          if (this.reconnectionAttempts > this.maxReconnectionAttempts && this._reconnectionErrorListener) {
-            res(
-              this._reconnectionErrorListener(
-                new Error("Connection could not be reestablished, exceeded maximum number of reconnection attempts.")
-              )
-            );
-          }
-
-          console.warn("Error during reconnect, retrying.");
-          console.warn(error);
-
-          if (this._reconnectingListener) {
-            this._reconnectingListener(this.reconnectionDelay);
-          }
-
-          this.reconnectionTimeout = setTimeout(() => this.reconnect(), this.reconnectionDelay);
-        });
-    });
   }
 
   kick(clientId, permsToken) {

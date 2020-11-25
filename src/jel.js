@@ -132,7 +132,6 @@ import "./hubs/systems/personal-space-bubble";
 import "./hubs/systems/app-mode";
 import "./hubs/systems/permissions";
 import "./hubs/systems/exit-on-blur";
-import "./hubs/systems/auto-pixel-ratio";
 import "./hubs/systems/idle-detector";
 import "./hubs/systems/camera-tools";
 import "./hubs/systems/userinput/userinput";
@@ -189,7 +188,7 @@ const isMobile = AFRAME.utils.device.isMobile();
 const isMobileVR = AFRAME.utils.device.isMobileVR();
 
 THREE.Object3D.DefaultMatrixAutoUpdate = false;
-window.APP.quality =
+window.APP.materialQuality =
   window.APP.store.state.preferences.materialQualitySetting === "low"
     ? "low"
     : window.APP.store.state.preferences.materialQualitySetting === "high"
@@ -197,6 +196,14 @@ window.APP.quality =
       : isMobile || isMobileVR
         ? "low"
         : "high";
+
+// Detail levels
+// 0 - Full
+// 1 - Reduce shadow map, no reflections, simple sky, no SSAO, no terrain detail meshes
+// 2 - Also disable shadows and FXAA
+//
+// Start at lowest detail level, so app boots quickly.
+window.APP.detailLevel = 2;
 
 import "./hubs/components/owned-object-limiter";
 import "./hubs/components/owned-object-cleanup-timeout";
@@ -411,9 +418,7 @@ async function initAvatar() {
 }
 
 async function checkPrerequisites() {
-  if (platformUnsupported()) {
-    return false;
-  }
+  if (platformUnsupported()) return false;
 
   const detectedOS = detectOS(navigator.userAgent);
 
@@ -536,7 +541,7 @@ function addGlobalEventListeners(scene, entryManager) {
   document.addEventListener("pointerlockchange", () => {
     const expanded = !document.pointerLockElement;
 
-    if (!isInQuillEditor()) {
+    if (!isInQuillEditor() && !(expanded && isInEditableField())) {
       scene.systems["hubs-systems"].uiAnimationSystem[expanded ? "expandSidePanels" : "collapseSidePanels"]();
     }
   });
@@ -592,11 +597,26 @@ function addGlobalEventListeners(scene, entryManager) {
     el.addEventListener("mouseover", () => scene.addState("pointer-exited"));
     el.addEventListener("mouseout", () => scene.removeState("pointer-exited"));
   });
+
+  // The app starts in low quality mode so loading screen runs OK, boost quality once loading is complete.
+  // The auto detail system will then lower the quality again if needed.
+  let performedInitialQualityBoost = false;
+
+  scene.addEventListener("terrain_chunk_loading_complete", () => {
+    if (!performedInitialQualityBoost) {
+      performedInitialQualityBoost = true;
+      window.APP.detailLevel = 0;
+      scene.renderer.setPixelRatio(window.devicePixelRatio);
+    }
+
+    scene.systems["hubs-systems"].autoQualitySystem.startTracking();
+  });
 }
 
 // Attempts to pause a-frame scene and rendering if tabbed away or maximized and window is blurred
 function setupNonVisibleHandler(scene) {
   const physics = scene.systems["hubs-systems"].physicsSystem;
+  const autoQuality = scene.systems["hubs-systems"].autoQualitySystem;
 
   const apply = hidden => {
     if (document.visibilityState === "hidden" || hidden) {
@@ -605,11 +625,13 @@ function setupNonVisibleHandler(scene) {
         scene.renderer.animation.stop();
       }
 
+      autoQuality.stopTracking();
       physics.updateSimulationRate(1000.0 / 15.0);
     } else {
       if (document.visibilityState === "visible") {
         scene.play();
         scene.renderer.animation.start();
+        autoQuality.startTracking();
       }
 
       physics.updateSimulationRate(1000.0 / 90.0);
@@ -871,10 +893,11 @@ async function loadMemberships() {
 }
 
 async function start() {
-  if (!checkPrerequisites()) return;
+  if (!(await checkPrerequisites())) return;
 
   const scene = document.querySelector("a-scene");
   const canvas = document.querySelector(".a-canvas");
+  scene.renderer.setPixelRatio(1); // Start with low pixel ratio, quality adjustment system will raise
 
   canvas.setAttribute("tabindex", 0); // Make it so canvas can be focused
 
@@ -922,7 +945,6 @@ async function start() {
 
   canvas.focus();
 
-  scene.setAttribute("shadow", { enabled: window.APP.quality !== "low" }); // Disable shadows on low quality
   scene.renderer.debug.checkShaderErrors = false;
 
   initBatching();
