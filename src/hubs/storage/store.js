@@ -1,4 +1,5 @@
 import { Validator } from "jsonschema";
+import mixpanel from "mixpanel-browser";
 import merge from "deepmerge";
 import Cookies from "js-cookie";
 import jwtDecode from "jwt-decode";
@@ -10,6 +11,8 @@ const validator = new Validator();
 import { EventTarget } from "event-target-shim";
 import { fetchRandomDefaultAvatarId, generateRandomName } from "../utils/identity.js";
 
+const capitalize = str => str[0].toUpperCase() + str.slice(1);
+
 // Durable (via local-storage) schema-enforced state that is meant to be consumed via forward data flow.
 // (Think flux but with way less incidental complexity, at least for now :))
 export const SCHEMA = {
@@ -20,7 +23,9 @@ export const SCHEMA = {
       type: "object",
       additionalProperties: false,
       properties: {
-        spaceId: { type: "string" }
+        spaceId: { type: "string" },
+        isFirstVisitToSpace: { type: "boolean" }, // true the very first time a space is visited, for initial setup
+        isSpaceCreator: { type: "boolean" } // true if this user ever created a space on this device
       }
     },
 
@@ -46,11 +51,27 @@ export const SCHEMA = {
       type: "object",
       additionalProperties: false,
       properties: {
+        hasRotated: { type: "boolean" }, // Legacy
+        hasScaled: { type: "boolean" }, // Legacy
+        hasFoundWiden: { type: "boolean" }, // Legacy
         lastEnteredAt: { type: "string" },
-        hasRotated: { type: "boolean" },
-        hasScaled: { type: "boolean" },
         entryCount: { type: "number" },
-        hasFoundWiden: { type: "boolean" }
+        narrow: { type: "boolean" },
+        widen: { type: "boolean" },
+        unmute: { type: "boolean" },
+        toggleMuteKey: { type: "boolean" },
+        wasd: { type: "boolean" },
+        createMenu: { type: "boolean" },
+        createWorld: { type: "boolean" },
+        avatarEdit: { type: "boolean" },
+        showInvite: { type: "boolean" },
+        rightDrag: { type: "boolean" },
+        rotated: { type: "boolean" },
+        scaled: { type: "boolean" },
+        mediaTextEdit: { type: "boolean" },
+        mediaTextEditClose: { type: "boolean" },
+        mediaTextCreate: { type: "boolean" },
+        mediaRemove: { type: "boolean" }
       }
     },
 
@@ -249,12 +270,6 @@ export default class Store extends EventTarget {
     }
   }
 
-  resetTipActivityFlags() {
-    this.update({
-      activity: { hasRotated: false, hasRecentered: false, hasScaled: false, entryCount: 0 }
-    });
-  }
-
   bumpEntryCount() {
     const currentEntryCount = this.state.activity.entryCount || 0;
     this.update({ activity: { entryCount: currentEntryCount + 1 } });
@@ -311,5 +326,15 @@ export default class Store extends EventTarget {
     this.dispatchEvent(new CustomEvent("statechanged"));
 
     return finalState;
+  }
+
+  handleActivityFlag(flag) {
+    const val = this.state.activity[flag];
+
+    if (val === undefined) {
+      this.update({ activity: { [flag]: true } });
+      mixpanel.track(`First ${capitalize(flag)}`, {});
+      this.dispatchEvent(new CustomEvent("activityflagged"));
+    }
   }
 }

@@ -33,6 +33,7 @@ import { TerrainSystem } from "../../jel/systems/terrain-system";
 import { AtmosphereSystem } from "../../jel/systems/atmosphere-system";
 import { UIAnimationSystem } from "../../jel/systems/ui-animation-system";
 import { AvatarSystem } from "../../jel/systems/avatar-system";
+import { SkyBeamSystem } from "../../jel/systems/sky-beam-system";
 import { MediaInteractionSystem } from "../../jel/systems/media-interaction-system";
 import { CameraRotatorSystem } from "../../hubs/systems/camera-rotator-system";
 import { KeyboardTipSystem } from "../../jel/systems/keyboard-tip-system";
@@ -50,7 +51,8 @@ AFRAME.registerSystem("hubs-systems", {
     this.positionAtBorderSystem = new PositionAtBorderSystem();
     this.cameraSystem = new CameraSystem(this.el);
     this.atmosphereSystem = new AtmosphereSystem(this.el, this.cameraSystem);
-    this.physicsSystem = new PhysicsSystem(this.el.object3D, this.atmosphereSystem);
+    this.skyBeamSystem = new SkyBeamSystem(this.el);
+    this.physicsSystem = new PhysicsSystem(this.el.object3D, this.atmosphereSystem, this.skyBeamSystem);
     this.constraintsSystem = new ConstraintsSystem(this.physicsSystem);
     this.twoPointStretchingSystem = new TwoPointStretchingSystem();
     this.singleActionButtonSystem = new SingleActionButtonSystem();
@@ -75,7 +77,7 @@ AFRAME.registerSystem("hubs-systems", {
     this.boneVisibilitySystem = new BoneVisibilitySystem();
     this.uvScrollSystem = new UVScrollSystem();
     this.mediaStreamSystem = new MediaStreamSystem(this.el);
-    this.wrappedEntitySystem = new WrappedEntitySystem(this.el, this.atmosphereSystem);
+    this.wrappedEntitySystem = new WrappedEntitySystem(this.el, this.atmosphereSystem, this.skyBeamSystem);
     this.terrainSystem = new TerrainSystem(this.el, this.atmosphereSystem);
     this.characterController = new CharacterControllerSystem(this.el, this.terrainSystem);
     this.uiAnimationSystem = new UIAnimationSystem(this.el, this.atmosphereSystem);
@@ -131,8 +133,9 @@ AFRAME.registerSystem("hubs-systems", {
     this.mediaPresenceSystem.tick();
     this.uiAnimationSystem.tick(t, dt);
     this.avatarSystem.tick(t, dt);
+    this.skyBeamSystem.tick(t, dt);
     this.keyboardTipSystem.tick();
-    this.autoQualitySystem.tick(dt);
+    this.autoQualitySystem.tick(t, dt);
 
     // We run this late in the frame so that its the last thing to have an opinion about the scale of an object
     this.boneVisibilitySystem.tick();

@@ -105,11 +105,6 @@ export const keyboardMouseUserBindings = addSetsToBindings({
       priority: 1001
     },
     {
-      src: { value: paths.device.keyboard.key("`") },
-      dest: { value: paths.actions.toggleUI },
-      xform: xforms.rising
-    },
-    {
       src: { value: paths.device.hud.penButton },
       dest: { value: togglePenWithHud },
       xform: xforms.rising
@@ -505,7 +500,7 @@ export const keyboardMouseUserBindings = addSetsToBindings({
       priority: 201
     },
     {
-      src: { value: paths.device.keyboard.key("`") },
+      src: { value: paths.device.keyboard.code("backquote") },
       dest: { value: paths.actions.mediaEditAction },
       xform: xforms.rising,
       priority: 201

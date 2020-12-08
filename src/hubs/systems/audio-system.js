@@ -6,6 +6,9 @@ import lipSyncWorker from "../../jel/workers/lipsync.worker.js";
 import rnnWasm from "../../jel/wasm/rnnoise-vad-wasm.js";
 const supportsInsertableStreams = !!(window.RTCRtpSender && !!RTCRtpSender.prototype.createEncodedStreams);
 
+export const supportsLipSync = () =>
+  typeof AudioWorklet == "function" && window.SharedArrayBuffer && supportsInsertableStreams;
+
 export class AudioSystem {
   constructor(sceneEl) {
     sceneEl.audioListener = sceneEl.audioListener || new THREE.AudioListener();
@@ -31,9 +34,7 @@ export class AudioSystem {
     this.aecHackOutboundPeer = null;
     this.aecHackInboundPeer = null;
 
-    const supportsLipSync = this.audioContext.audioWorklet && window.SharedArrayBuffer && supportsInsertableStreams;
-
-    if (supportsLipSync) {
+    if (supportsLipSync()) {
       this.startLipSync(sceneEl);
     }
 
@@ -147,13 +148,13 @@ export class AudioSystem {
         this.lipSyncWorker.postMessage(this.lipSyncVadBuffer);
         this.lipSyncWorker.postMessage(this.lipSyncAudioOffsetBuffer);
 
-        if (!this.scene.is("muted")) {
+        if (this.scene.is("unmuted")) {
           this.enableLipSync();
         }
 
         const handleStateChange = e => {
-          if (e.detail === "muted") {
-            this.scene.is("muted") ? this.disableLipSync() : this.enableLipSync();
+          if (e.detail === "unmuted") {
+            this.scene.is("unmuted") ? this.enableLipSync() : this.disableLipSync();
           }
         };
 

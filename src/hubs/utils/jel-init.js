@@ -6,9 +6,12 @@ import { authorizeOrSanitizeMessage } from "./permissions-utils";
 import { isSetEqual } from "../../jel/utils/set-utils";
 import { homeHubForSpaceId } from "../../jel/utils/membership-utils";
 import { clearResolveUrlCache } from "./media-utils";
+import { addNewHubToTree } from "../../jel/utils/tree-utils";
+import { getMessages } from "./i18n";
 import qsTruthy from "./qs_truthy";
 import { getReticulumMeta, invalidateReticulumMeta, connectToReticulum } from "./phoenix-utils";
 import HubStore from "../storage/hub-store";
+import mixpanel from "mixpanel-browser";
 
 const PHOENIX_RELIABLE_NAF = "phx-reliable";
 const NOISY_OCCUPANT_COUNT = 12; // Above this # of occupants, we stop posting join/leaves/renames
@@ -198,13 +201,13 @@ const initSpacePresence = (presence, socket, remountUI, remountJelUI, addToPrese
   const { hubChannel, spaceChannel } = window.APP;
 
   const scene = document.querySelector("a-scene");
+  let sentMultipleOccupantGaugeThisSession = false;
 
   return new Promise(res => {
     presence.onSync(() => {
       const presence = spaceChannel.presence;
       remountUI({ spacePresences: presence.state });
       remountJelUI({ spacePresences: presence.state });
-
       presence.__hadInitialSync = true;
       res();
     });
@@ -258,6 +261,11 @@ const initSpacePresence = (presence, socket, remountUI, remountJelUI, addToPrese
             });
           }
         }
+      }
+
+      if (occupantCount > 1 && !sentMultipleOccupantGaugeThisSession) {
+        sentMultipleOccupantGaugeThisSession = true;
+        mixpanel.track("Gauge Multiple Occupants", {});
       }
 
       scene.emit("space_presence_updated", {
@@ -381,7 +389,7 @@ const joinSpaceChannel = async (
                   scene.setAttribute("networked-scene", { serverURL: newXanaURL });
                   adapter.setServerUrl(newXanaURL);
                 }
-              }, 1000);
+              }, 10000);
             },
             () => {
               clearInterval(newXanaHostPollInterval);
@@ -635,8 +643,9 @@ const setupSpaceChannelMessageHandlers = spacePhxChannel => {
   spacePhxChannel.on("persona_refresh", ({ session_id }) => {
     const scene = document.querySelector("a-scene");
 
-    // If persona changed, update avatar color
+    // If persona changed, update avatar color + sky beam color
     scene.systems["hubs-systems"].avatarSystem.markPersonaAvatarDirty(session_id);
+    scene.systems["hubs-systems"].skyBeamSystem.markColorDirtyForCreator(session_id);
   });
 };
 
@@ -734,7 +743,7 @@ const setupHubChannelMessageHandlers = (
   });
 
   hubPhxChannel.on("mute", ({ session_id }) => {
-    if (session_id === NAF.clientId && !scene.is("muted")) {
+    if (session_id === NAF.clientId && scene.is("unmuted")) {
       scene.emit("action_mute");
     }
   });
@@ -781,6 +790,14 @@ export function joinSpace(
       await treeManager.init(connection, memberships);
       const homeHub = homeHubForSpaceId(spaceId, memberships);
       hubMetadata.ensureMetadataForIds([homeHub.hub_id]);
+
+      if (store.state.context.isFirstVisitToSpace) {
+        // First time space setup, create initial public world. TODO do this server-side.
+        const firstWorldName = getMessages()["space.initial-world-name"];
+        await addNewHubToTree(history, treeManager, spaceId, null, firstWorldName);
+
+        store.update({ context: { isFirstVisitToSpace: false } });
+      }
 
       remountJelUI({ history, treeManager });
     },

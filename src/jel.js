@@ -3,6 +3,7 @@ import "./hubs/utils/theme";
 import "@babel/polyfill";
 import "./hubs/utils/debug-log";
 import { isInQuillEditor } from "./jel/utils/quill-utils";
+import mixpanel from "mixpanel-browser";
 
 console.log(`App version: ${process.env.BUILD_VERSION || "?"}`);
 
@@ -21,6 +22,7 @@ import "naf-janus-adapter";
 import "aframe-rounded";
 import "webrtc-adapter";
 import "aframe-slice9-component";
+import configs from "./hubs/utils/configs";
 import "./hubs/utils/threejs-positional-audio-updatematrixworld";
 import "./hubs/utils/threejs-world-update";
 import patchThreeAllocations from "./hubs/utils/threejs-allocation-patches";
@@ -241,9 +243,31 @@ NAF.options.syncSource = PHOENIX_RELIABLE_NAF;
 const isBotMode = qsTruthy("bot");
 const isTelemetryDisabled = qsTruthy("disable_telemetry");
 const isDebug = qsTruthy("debug");
+const disablePausing = qsTruthy("no_pause");
 
 if (!isBotMode && !isTelemetryDisabled) {
   registerTelemetry("/hub", "Room Landing Page");
+
+  // Can't do this in the other file otherwise get a mixpanel error
+  if (configs.MIXPANEL_TOKEN) {
+    mixpanel.init(configs.MIXPANEL_TOKEN, { batch_requests: true });
+
+    if (store.credentialsAccountId) {
+      // Perform a simple hash to track the account in mixpanel to increase user privacy
+      const accountId = store.credentialsAccountId;
+
+      let hash = 0;
+
+      for (let i = 0; i < accountId.length; i++) {
+        const chr = accountId.charCodeAt(i);
+        hash = (hash << 5) - hash + chr;
+        hash |= 0;
+      }
+
+      hash = Math.abs(hash);
+      mixpanel.identify(`${hash}`);
+    }
+  }
 }
 
 registerWrappedEntityPositionNormalizers();
@@ -607,6 +631,7 @@ function addGlobalEventListeners(scene, entryManager) {
       performedInitialQualityBoost = true;
       window.APP.detailLevel = 0;
       scene.renderer.setPixelRatio(window.devicePixelRatio);
+      mixpanel.track("Event First World Load Complete", {});
     }
 
     scene.systems["hubs-systems"].autoQualitySystem.startTracking();
@@ -625,6 +650,7 @@ function setupNonVisibleHandler(scene) {
         scene.renderer.animation.stop();
       }
 
+      document.body.classList.add("paused");
       autoQuality.stopTracking();
       physics.updateSimulationRate(1000.0 / 15.0);
     } else {
@@ -634,26 +660,28 @@ function setupNonVisibleHandler(scene) {
         autoQuality.startTracking();
       }
 
+      document.body.classList.remove("paused");
       physics.updateSimulationRate(1000.0 / 90.0);
     }
   };
 
-  const isProbablyMaximized = () => screen.availWidth - window.innerWidth === 0;
-  document.addEventListener("visibilitychange", () => apply());
-
   // Need a timeout since tabbing in browser causes blur then focus rapidly
   let windowBlurredTimeout = null;
 
-  window.addEventListener("blur", () => {
-    windowBlurredTimeout = setTimeout(() => {
-      if (isProbablyMaximized()) apply(true);
-    }, 500);
-  });
+  document.addEventListener("visibilitychange", () => apply());
 
-  window.addEventListener("focus", () => {
-    clearTimeout(windowBlurredTimeout);
-    if (isProbablyMaximized()) apply(false);
-  });
+  if (!disablePausing) {
+    window.addEventListener("blur", () => {
+      windowBlurredTimeout = setTimeout(() => {
+        apply(true);
+      }, 500);
+    });
+
+    window.addEventListener("focus", () => {
+      clearTimeout(windowBlurredTimeout);
+      apply(false);
+    });
+  }
 }
 
 function setupSidePanelLayout(scene) {
@@ -894,12 +922,30 @@ async function loadMemberships() {
 
 async function start() {
   if (!(await checkPrerequisites())) return;
+  mixpanel.track("Startup Start", {});
 
   const scene = document.querySelector("a-scene");
   const canvas = document.querySelector(".a-canvas");
   scene.renderer.setPixelRatio(1); // Start with low pixel ratio, quality adjustment system will raise
 
   canvas.setAttribute("tabindex", 0); // Make it so canvas can be focused
+
+  if (navigator.serviceWorker) {
+    try {
+      navigator.serviceWorker
+        .register("/jel.service.js")
+        .then(() => {
+          //navigator.serviceWorker.ready;
+          //  .then(registration => subscriptions.setRegistration(registration))
+          //  .catch(() => subscriptions.setRegistrationFailed());
+        })
+        .catch(() => /*subscriptions.setRegistrationFailed()*/ {});
+    } catch (e) {
+      //subscriptions.setRegistrationFailed();
+    }
+  } else {
+    //subscriptions.setRegistrationFailed();
+  }
 
   const entryManager = new SceneEntryManager(spaceChannel, hubChannel, authChannel, history);
   const messageDispatch = new MessageDispatch(
@@ -1090,9 +1136,11 @@ async function start() {
   await quillPoolPromise;
 
   history.listen(performJoin);
+  mixpanel.track("Startup Joining", {});
   await performJoin();
+  mixpanel.track("Startup Joined", {});
 
-  entryManager.enterScene(false, true);
+  entryManager.enterScene(false);
 }
 
 document.addEventListener("DOMContentLoaded", start);

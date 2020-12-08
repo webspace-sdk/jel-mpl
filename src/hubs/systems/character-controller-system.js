@@ -61,6 +61,7 @@ export class CharacterControllerSystem {
     this.relativeMotion = new THREE.Vector3(0, 0, 0);
     this.nextRelativeMotion = new THREE.Vector3(0, 0, 0);
     this.dXZ = 0;
+    this.movedThisFrame = false;
     this.scene.addEventListener("terrain_chunk_loaded", () => {
       this.navGroup = null;
       this.navNode = null;
@@ -277,6 +278,10 @@ export class CharacterControllerSystem {
       const boost = userinput.get(paths.actions.boost) ? 2 : 1;
 
       if (characterAcceleration) {
+        if (characterAcceleration[0] || characterAcceleration[1]) {
+          window.APP.store.handleActivityFlag("wasd");
+        }
+
         const zCharacterAcceleration = -1 * characterAcceleration[1];
         this.relativeMotion.set(
           this.relativeMotion.x +
@@ -371,6 +376,8 @@ export class CharacterControllerSystem {
             this.fly = false;
           }
         }
+
+        this.movedThisFrame = triedToMove;
       }
 
       const newX = newPOV.elements[12];

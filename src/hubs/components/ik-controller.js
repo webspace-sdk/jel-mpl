@@ -93,6 +93,7 @@ AFRAME.registerComponent("ik-controller", {
     this._runScheduledWork = this._runScheduledWork.bind(this);
     this._updateIsInView = this._updateIsInView.bind(this);
     this.avatarSystem = this.el.sceneEl.systems["hubs-systems"].avatarSystem;
+    this.skyBeamSystem = this.el.sceneEl.systems["hubs-systems"].skyBeamSystem;
 
     if (this.data.instanceHeads) {
       this.avatarSystem.register(this.el, this.data.isSelf);
@@ -145,6 +146,10 @@ AFRAME.registerComponent("ik-controller", {
 
     if (this.data.instanceHeads) {
       this.avatarSystem.unregister(this.el);
+
+      if (this.head) {
+        this.skyBeamSystem.unregister(this.head);
+      }
     }
   },
 
@@ -160,7 +165,16 @@ AFRAME.registerComponent("ik-controller", {
     }
 
     if (this.data.head !== oldData.head) {
+      if (this.head) {
+        this.skyBeamSystem.unregister(this.head);
+      }
+
       this.head = this.el.object3D.getObjectByName(this.data.head);
+
+      if (!this.data.isSelf) {
+        this.skyBeamSystem.register(this.head, true);
+      }
+
       this.scaleAudioFeedback = this.head.el.components["scale-audio-feedback"];
     }
 
@@ -349,6 +363,10 @@ AFRAME.registerComponent("ik-controller", {
 
       if (this.data.instanceHeads) {
         this.avatarSystem.markMatrixDirty(this.el);
+
+        if (this.head) {
+          this.skyBeamSystem.markMatrixDirty(this.head);
+        }
       }
 
       root.matrixNeedsUpdate = true;
