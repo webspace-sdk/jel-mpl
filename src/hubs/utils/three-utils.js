@@ -1,3 +1,5 @@
+import { MeshBVH } from "three-mesh-bvh";
+
 const tempVector3 = new THREE.Vector3();
 const tempQuaternion = new THREE.Quaternion();
 
@@ -105,6 +107,9 @@ export const IDENTITY_QUATERNION = new THREE.Quaternion();
 export const ONES = new THREE.Vector3(1, 1, 1);
 
 export function setMatrixWorld(object3D, m) {
+  // Check for equality to avoid invaliding children matrices
+  if (object3D.matrixWorld.equals(m)) return;
+
   if (!object3D.matrixIsModified) {
     object3D.applyMatrix(IDENTITY); // hack around our matrix optimizations
   }
@@ -336,6 +341,9 @@ export function almostEqual(a, b, epsilon = 0.01) {
 export function almostEqualVec3(a, b, epsilon = 0.01) {
   return almostEqual(a.x, b.x, epsilon) && almostEqual(a.y, b.y, epsilon) && almostEqual(a.z, b.z, epsilon);
 }
+export function almostEqualQuaternion(a, b) {
+  return Math.abs(a.dot(b) - 1.0) < 0.000001;
+}
 
 export const affixToWorldUp = (function() {
   const inRotationMat4 = new THREE.Matrix4();
@@ -357,18 +365,6 @@ export const affixToWorldUp = (function() {
     outMat4.scale(v.setFromMatrixScale(inMat4Copy));
     outMat4.setPosition(v.setFromMatrixColumn(inMat4Copy, 3));
     return outMat4;
-  };
-})();
-
-export const calculateCameraTransformForWaypoint = (function() {
-  const upAffixedCameraTransform = new THREE.Matrix4();
-  const upAffixedWaypointTransform = new THREE.Matrix4();
-  const detachFromWorldUp = new THREE.Matrix4();
-  return function calculateCameraTransformForWaypoint(cameraTransform, waypointTransform, outMat4) {
-    affixToWorldUp(cameraTransform, upAffixedCameraTransform);
-    detachFromWorldUp.getInverse(upAffixedCameraTransform).multiply(cameraTransform);
-    affixToWorldUp(waypointTransform, upAffixedWaypointTransform);
-    outMat4.copy(upAffixedWaypointTransform).multiply(detachFromWorldUp);
   };
 })();
 
@@ -421,3 +417,22 @@ export const childMatch = (function() {
     setMatrixWorld(parent, newParentMatrix);
   };
 })();
+
+export function generateMeshBVH(object3D) {
+  object3D.traverse(obj => {
+    // note that we might already have a bounds tree if this was a clone of an object with one
+    const hasBufferGeometry = obj.isMesh && obj.geometry.isBufferGeometry;
+    const hasBoundsTree = hasBufferGeometry && obj.geometry.boundsTree;
+    if (hasBufferGeometry && !hasBoundsTree && obj.geometry.attributes.position) {
+      const geo = obj.geometry;
+      const triCount = geo.index ? geo.index.count / 3 : geo.attributes.position.count / 3;
+      // only bother using memory and time making a BVH if there are a reasonable number of tris,
+      // and if there are too many it's too painful and large to tolerate doing it (at least until
+      // we put this in a web worker)
+      if (triCount > 1000 && triCount < 1000000) {
+        // note that bounds tree construction creates an index as a side effect if one doesn't already exist
+        geo.boundsTree = new MeshBVH(obj.geometry, { strategy: 0, maxDepth: 30 });
+      }
+    }
+  });
+}

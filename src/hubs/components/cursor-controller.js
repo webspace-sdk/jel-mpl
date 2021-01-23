@@ -2,6 +2,7 @@ import { paths } from "../systems/userinput/paths";
 import { sets } from "../systems/userinput/sets";
 import { almostEqualVec3, getLastWorldPosition } from "../utils/three-utils";
 import { RENDER_ORDER } from "../constants";
+import { waitForDOMContentLoaded } from "../utils/async-utils";
 
 const HIGHLIGHT = new THREE.Color(0, 0xec / 255, 0xff / 255);
 const NO_HIGHLIGHT = new THREE.Color(0.15, 0.15, 0.15);
@@ -37,6 +38,11 @@ AFRAME.registerComponent("cursor-controller", {
     this.raycaster.firstHitOnly = true; // flag specific to three-mesh-bvh
     this.distance = this.data.far;
     this.color = new THREE.Color(0, 0, 0);
+
+    waitForDOMContentLoaded().then(() => {
+      this.cssGazeCursor = document.querySelector("#gaze-cursor .cursor");
+      this.lastCssGazeCursorOffset = Infinity;
+    });
 
     const lineGeometry = new THREE.BufferGeometry();
     lineGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(2 * 3), 3));
@@ -127,8 +133,6 @@ AFRAME.registerComponent("cursor-controller", {
         cursor.object3D.matrixNeedsUpdate = true;
       }
 
-      let showCursor = !scene.is("pointer-exited");
-
       // TODO : Check if the selected object being transformed is for this cursor!
       const transformObjectSystem = AFRAME.scenes[0].systems["transform-selected-object"];
       if (
@@ -136,19 +140,23 @@ AFRAME.registerComponent("cursor-controller", {
         ((left && transformObjectSystem.hand.el.id === "player-left-controller") ||
           (!left && transformObjectSystem.hand.el.id === "player-right-controller"))
       ) {
-        const lockedMode = !!document.pointerLockElement;
-
-        if (lockedMode) {
-          // Hide cursor when transforming in cursor locked mode
-          // The position is restored after release in app-aware-mouse
-          showCursor = false;
-        } else {
-          this.color.copy(TRANSFORM_COLOR_1).lerpHSL(TRANSFORM_COLOR_2, 0.5 + 0.5 * Math.sin(t / 1000.0));
-        }
+        this.color.copy(TRANSFORM_COLOR_1).lerpHSL(TRANSFORM_COLOR_2, 0.5 + 0.5 * Math.sin(t / 1000.0));
       } else if (this.intersectionIsValid || isGrabbing) {
         this.color.copy(HIGHLIGHT);
       } else {
         this.color.copy(NO_HIGHLIGHT);
+      }
+
+      const showCursor = document.body.classList.contains("show-3d-cursor");
+      const canvasHeight = AFRAME.scenes[0].canvas.offsetHeight;
+      // This magic number is determined by trial-and-error, is a function of the world radius
+      const cssGazeYOffset = Math.floor(this.distance * (canvasHeight / 425.0));
+
+      // Huge hack, due to vertex curving, the CSS-based gaze cursor needs to be offset a bit
+      // vertically based upon how far the intersection is in a way similar to the 3d cursor.
+      if (this.cssGazeCursor && this.lastCssGazeCursorOffset !== cssGazeYOffset) {
+        this.cssGazeCursor.setAttribute("style", `transform: translateY(${cssGazeYOffset}px);`);
+        this.lastCssGazeCursorOffset = cssGazeYOffset;
       }
 
       const mesh = this.data.cursor.object3DMap.mesh;

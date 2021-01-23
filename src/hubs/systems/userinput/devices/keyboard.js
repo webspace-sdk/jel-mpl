@@ -2,6 +2,9 @@ import { paths } from "../paths";
 import { ArrayBackedSet } from "../array-backed-set";
 import { isInEditableField } from "../../../../jel/utils/dom-utils";
 import { isInQuillEditor } from "../../../../jel/utils/quill-utils";
+import { beginPersistentCursorLock, endCursorLock } from "../../../../jel/utils/dom-utils";
+import { CURSOR_LOCK_STATES, getCursorLockState } from "../../../../jel/utils/dom-utils";
+import { PAGABLE_MEDIA_VIEW_COMPONENTS } from "../../../utils/media-utils";
 
 export class KeyboardDevice {
   constructor() {
@@ -15,26 +18,87 @@ export class KeyboardDevice {
       document.addEventListener(x, e => {
         if (!e.key) return;
         let pushEvent = true;
+        if (!AFRAME.scenes[0]) return;
 
-        // Blur focused elements when a popup menu is open so it is closed
-        if (e.type === "keydown" && e.key === "Escape" && isInEditableField()) {
-          AFRAME.scenes[0].canvas.focus();
+        const scene = AFRAME.scenes[0];
+        const canvas = scene.canvas;
+        const store = window.APP.store;
+        const isGameFocused = document.activeElement === canvas || document.activeElement === document.body;
+
+        // Prevent default on control key press *after* R to prevent reload during rotation/roll
+        if (e.ctrlKey && e.type === "keydown" && this.codes.get("keyr")) {
           e.preventDefault();
         }
 
-        // Non-repeated shift-space is cursor lock hotkey.
-        if (e.type === "keydown" && e.key === " " && e.shiftKey && !e.repeat && !isInEditableField()) {
-          const canvas = AFRAME.scenes[0].canvas;
+        if (isGameFocused && e.key === "Tab") {
+          // Tab is used for object movement
+          e.preventDefault();
+        }
 
-          if (canvas.requestPointerLock) {
-            if (document.pointerLockElement === canvas) {
-              document.exitPointerLock();
-            } else {
-              canvas.requestPointerLock();
+        // Blur focused elements when a popup menu is open so it is closed
+        if (e.type === "keydown" && e.key === "Escape" && isInEditableField()) {
+          canvas.focus();
+          e.preventDefault();
+        }
+
+        // Handle spacebar here since input system can't differentiate with and without modifier key held, and deal with repeats
+        if (e.type === "keydown" && e.key === " " && !e.repeat) {
+          if (!e.altKey && !e.metaKey) {
+            if (e.ctrlKey && !isInEditableField()) {
+              const interaction = AFRAME.scenes[0].systems.interaction;
+
+              const hovered =
+                interaction.state.leftHand.hovered ||
+                interaction.state.rightHand.hovered ||
+                interaction.state.rightRemote.hovered ||
+                interaction.state.leftRemote.hovered;
+
+              // Paging using ctrl-space, so skip
+              let hoveredOverPagableMedia = false;
+
+              if (hovered) {
+                for (const name of PAGABLE_MEDIA_VIEW_COMPONENTS) {
+                  if (hovered.components[name]) {
+                    hoveredOverPagableMedia = true;
+                    break;
+                  }
+                }
+              }
+
+              if (!hoveredOverPagableMedia) {
+                const cursorLockState = getCursorLockState();
+
+                // Shift+Space widen
+                if (cursorLockState !== CURSOR_LOCK_STATES.LOCKED_PERSISTENT) {
+                  beginPersistentCursorLock();
+                } else {
+                  endCursorLock();
+                }
+
+                e.preventDefault();
+              }
             }
           }
+        }
 
-          e.preventDefault();
+        // Handle enter here to avoid repeats
+        if (e.type === "keydown" && e.key === "Enter" && !e.repeat) {
+          // Space without widen, show or hide chat.
+          if (scene.is("entered")) {
+            if (!isInEditableField()) {
+              scene.emit("action_chat_entry");
+              store.handleActivityFlag("chat");
+              e.preventDefault();
+            } else {
+              // If space is entered while inside of chat message entry input, and it's empty, blur it.
+              const el = document.activeElement;
+
+              if (el.classList.contains("blur-on-empty-space") && el.value === "") {
+                canvas.focus();
+                e.preventDefault();
+              }
+            }
+          }
         }
 
         // ` in text editor blurs it
@@ -43,7 +107,7 @@ export class KeyboardDevice {
           // Without this, quill grabs focus when others types
           document.activeElement.parentElement.__quill.blur();
 
-          AFRAME.scenes[0].canvas.focus();
+          canvas.focus();
           pushEvent = false; // Prevent primary action this tick if cursor still over 3d text page
           e.preventDefault();
         }
@@ -55,7 +119,7 @@ export class KeyboardDevice {
           document.activeElement &&
           document.activeElement.classList.contains("create-select-selection-search-input")
         ) {
-          AFRAME.scenes[0].canvas.focus();
+          canvas.focus();
           pushEvent = false; // Prevent primary action this tick if cursor still over 3d text page
           e.preventDefault();
         }
@@ -74,7 +138,7 @@ export class KeyboardDevice {
               e.key === "8" ||
               e.key === "9" ||
               e.key === "0")) ||
-          (e.key === " " && document.activeElement === document.body) // Disable spacebar scrolling in main window
+          (e.key === " " && isGameFocused) // Disable spacebar scrolling in main window
         ) {
           e.preventDefault();
         }
@@ -107,39 +171,58 @@ export class KeyboardDevice {
         this.seenCodes.add(code);
 
         if (event.ctrlKey) {
-          this.keys.set("control", isDown);
+          this.keys.set("control", true);
           this.seenKeys.add("control");
+        } else {
+          this.keys.set("control", false);
         }
 
         if (event.altKey) {
-          this.keys.set("alt", isDown);
+          this.keys.set("alt", true);
           this.seenKeys.add("alt");
+        } else {
+          this.keys.set("alt", false);
         }
 
         if (event.metaKey) {
-          this.keys.set("meta", isDown);
+          this.keys.set("meta", true);
           this.seenKeys.add("meta");
+        } else {
+          this.keys.set("meta", false);
         }
 
         if (event.shiftKey) {
-          this.keys.set("shift", isDown);
+          this.keys.set("shift", true);
           this.seenKeys.add("shift");
+        } else {
+          this.keys.set("shift", false);
         }
       }
     }
 
     this.events.length = 0;
+    let hasAnyKeys = false;
 
     for (let i = 0; i < this.seenKeys.items.length; i++) {
       const key = this.seenKeys.items[i];
       const path = paths.device.keyboard.key(key);
       frame.setValueType(path, this.keys.get(key));
+
+      if (this.keys.get(key)) {
+        hasAnyKeys = true;
+      }
     }
 
     for (let i = 0; i < this.seenCodes.items.length; i++) {
       const code = this.seenCodes.items[i];
       const path = paths.device.keyboard.code(code);
       frame.setValueType(path, this.codes.get(code));
+
+      if (this.codes.get(code)) {
+        hasAnyKeys = true;
+      }
     }
+
+    frame.setValueType(paths.device.keyboard.any, hasAnyKeys);
   }
 }

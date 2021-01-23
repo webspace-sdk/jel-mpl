@@ -1,7 +1,6 @@
 import jwtDecode from "jwt-decode";
 import { EventTarget } from "event-target-shim";
 import { Presence } from "phoenix";
-import { migrateChannelToSocket, unbindPresence } from "./phoenix-utils";
 
 export default class HubChannel extends EventTarget {
   constructor(store) {
@@ -34,14 +33,8 @@ export default class HubChannel extends EventTarget {
     return roomEntrySlotCount < (hub.room_size !== undefined ? hub.room_size : DEFAULT_ROOM_SIZE);*/
   }
 
-  // Migrates this channel to a new phoenix channel and presence
-  async migrateToSocket(socket, params) {
-    const rebindPresence = unbindPresence(this.presence);
-    this.channel = await migrateChannelToSocket(this.channel, socket, params);
-    this.presence = rebindPresence(this.channel);
-  }
-
   bind = (channel, hubId) => {
+    this.leave();
     this.channel = channel;
     this.presence = new Presence(channel);
     this.hubId = hubId;
@@ -103,10 +96,18 @@ export default class HubChannel extends EventTarget {
     return new Promise(resolve => this.channel.push("unsubscribe", { subscription }).receive("ok", resolve));
   };
 
-  sendMessage = (body, type = "chat") => {
+  sendMessage = (body, type = "chat", toSessionId) => {
     if (!this.channel) return;
     if (!body) return;
-    this.channel.push("message", { body, type });
+    const payload = { body, type };
+    if (toSessionId) {
+      payload.to_session_id = toSessionId;
+    }
+    this.channel.push("message", payload);
+  };
+
+  templateSynced = template_hash => {
+    this.channel.push("hub_template_synced", { template_hash });
   };
 
   fetchPermissions = () => {

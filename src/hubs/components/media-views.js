@@ -22,6 +22,7 @@ import {
   meetsBatchingCriteria,
   hasMediaLayer,
   scaleToAspectRatio,
+  groundMedia,
   MEDIA_INTERACTION_TYPES
 } from "../utils/media-utils";
 import { proxiedUrlFor, getCorsProxyServer } from "../utils/media-url-utils";
@@ -34,6 +35,7 @@ import { refreshMediaMirror, getCurrentMirroredMedia } from "../utils/mirror-uti
 import { MEDIA_PRESENCE } from "../utils/media-utils";
 import { disposeExistingMesh, disposeTexture, disposeTextureImage } from "../utils/three-utils";
 import { addVertexCurvingToMaterial } from "../../jel/systems/terrain-system";
+import { chicletGeometry, chicletGeometryFlipped } from "../../jel/objects/chiclet-geometry.js";
 
 /**
  * Warning! This require statement is fragile!
@@ -259,6 +261,7 @@ AFRAME.registerComponent("media-video", {
     coneOuterAngle: { type: "number", default: 0 },
     coneOuterGain: { type: "number", default: 0 },
     videoPaused: { type: "boolean" },
+    playOnHover: { type: "boolean", default: false },
     projection: { type: "string", default: "flat" },
     time: { type: "number" },
     tickRate: { default: 1000 }, // ms interval to send time interval updates
@@ -299,7 +302,9 @@ AFRAME.registerComponent("media-video", {
 
       this.timeLabel = this.el.querySelector(".video-time-label");
       this.volumeLabel = this.el.querySelector(".video-volume-label");
+      this.playPauseButton = this.el.querySelector(".video-playpause-button");
 
+      this.playPauseButton.object3D.addEventListener("interact", this.togglePlaying);
       this.updateVolumeLabel();
       this.updateHoverMenu();
       this.updatePlaybackState();
@@ -447,6 +452,8 @@ AFRAME.registerComponent("media-video", {
     if (this.networkedEl && isMine(this.networkedEl)) {
       this.el.emit("owned-video-state-changed");
     }
+
+    this.updateHoverMenu();
   },
 
   updatePlaybackState(force) {
@@ -481,6 +488,10 @@ AFRAME.registerComponent("media-video", {
     // update the video to currentTime = 0
     if (this.videoIsLive === false && currentTime !== undefined) {
       this.video.currentTime = currentTime;
+    }
+
+    if (this.hoverMenu) {
+      this.playPauseButton.setAttribute("icon-button", "active", pause);
     }
 
     if (pause) {
@@ -627,6 +638,7 @@ AFRAME.registerComponent("media-video", {
         if (this.video) {
           this.video.addEventListener("pause", this.onPauseStateChange);
           this.video.addEventListener("play", this.onPauseStateChange);
+          this.video.addEventListener("ended", this.onPauseStateChange);
           this.updatePlaybackState(true);
         }
 
@@ -676,6 +688,7 @@ AFRAME.registerComponent("media-video", {
         this.video.loop = this.data.loop;
         this.video.addEventListener("pause", this.onPauseStateChange);
         this.video.addEventListener("play", this.onPauseStateChange);
+        this.video.addEventListener("ended", this.onPauseStateChange);
 
         // Deal with setting LIVE on video or not
         if (texture.hls) {
@@ -747,8 +760,7 @@ AFRAME.registerComponent("media-video", {
           // invert the geometry on the x-axis so that all of the faces point inward
           geometry.scale(-1, 1, 1);
         } else {
-          geometry = new THREE.PlaneBufferGeometry(1, 1, 10, 10);
-          material.side = THREE.DoubleSide;
+          geometry = (await chicletGeometry).clone();
         }
 
         this.mesh = new THREE.Mesh(geometry, material);
@@ -963,6 +975,12 @@ AFRAME.registerComponent("media-video", {
     if (this.videoIsLive) {
       this.timeLabel.setAttribute("text", "value", "LIVE");
     }
+
+    this.playPauseButton.object3D.visible = this.mayModifyPlayHead();
+
+    if (this.video) {
+      this.playPauseButton.setAttribute("icon-button", "active", this.video.paused);
+    }
   },
 
   updateVolumeLabel() {
@@ -985,20 +1003,35 @@ AFRAME.registerComponent("media-video", {
       const userinput = this.el.sceneEl.systems.userinput;
       const interaction = this.el.sceneEl.systems.interaction;
       const volumeModRight = userinput.get(paths.actions.cursor.right.mediaVolumeMod);
-      if (interaction.state.rightRemote.hovered === this.el && volumeModRight) {
+      const isHoveredLeft = interaction.state.leftRemote.hovered == this.el;
+      const isHoveredRight = interaction.state.rightRemote.hovered == this.el;
+
+      if (isHoveredRight === this.el && volumeModRight) {
         this.changeVolumeBy(volumeModRight);
       }
       const volumeModLeft = userinput.get(paths.actions.cursor.left.mediaVolumeMod);
-      if (interaction.state.leftRemote.hovered === this.el && volumeModLeft) {
+      if (isHoveredLeft === this.el && volumeModLeft) {
         this.changeVolumeBy(volumeModLeft);
       }
 
       const isHeld = interaction.isHeld(this.el);
+      const isHovering = isHoveredLeft || isHoveredRight;
+
+      if (
+        this.data.videoPaused &&
+        this.data.playOnHover &&
+        isHovering &&
+        !this.wasHovering &&
+        this.mayModifyPlayHead()
+      ) {
+        this.togglePlaying();
+      }
 
       if (this.wasHeld && !isHeld) {
         this.localSnapCount = 0;
       }
 
+      this.wasHovering = isHovering;
       this.wasHeld = isHeld;
 
       if (this.hoverMenu && this.hoverMenu.object3D.visible && !this.videoIsLive) {
@@ -1069,6 +1102,11 @@ AFRAME.registerComponent("media-video", {
     if (this.video) {
       this.video.removeEventListener("pause", this.onPauseStateChange);
       this.video.removeEventListener("play", this.onPauseStateChange);
+      this.video.removeEventListener("ended", this.onPauseStateChange);
+    }
+
+    if (this.hoverMenu) {
+      this.playPauseButton.object3D.removeEventListener("interact", this.togglePlaying);
     }
 
     window.APP.store.removeEventListener("statechanged", this.onPreferenceChanged);
@@ -1078,8 +1116,12 @@ AFRAME.registerComponent("media-video", {
     }
   },
 
+  mayModifyPlayHead() {
+    return !!this.video && !this.videoIsLive && window.APP.hubChannel.can("spawn_and_move_media");
+  },
+
   handleMediaInteraction(type) {
-    const mayModifyPlayHead = !!this.video && !this.videoIsLive && window.APP.hubChannel.can("spawn_and_move_media");
+    const mayModifyPlayHead = this.mayModifyPlayHead();
 
     if (type === MEDIA_INTERACTION_TYPES.PRIMARY && mayModifyPlayHead) {
       this.togglePlaying();
@@ -1318,8 +1360,7 @@ AFRAME.registerComponent("media-image", {
             }
           }
         } else {
-          geometry = new THREE.PlaneBufferGeometry(1, 1, 10, 10, texture.flipY);
-          material.side = THREE.DoubleSide;
+          geometry = (texture.flipY ? await chicletGeometry : await chicletGeometryFlipped).clone();
         }
 
         this.mesh = new THREE.Mesh(geometry, material);
@@ -1406,6 +1447,10 @@ AFRAME.registerComponent("media-image", {
   handleMediaInteraction(type) {
     if (type === MEDIA_INTERACTION_TYPES.OPEN) {
       window.open(this.el.components["media-loader"].data.src);
+    }
+
+    if (type === MEDIA_INTERACTION_TYPES.DOWN) {
+      groundMedia(this.el, true);
     }
   }
 });
@@ -1598,8 +1643,7 @@ AFRAME.registerComponent("media-pdf", {
 
         addVertexCurvingToMaterial(material);
 
-        const geometry = new THREE.PlaneBufferGeometry(1, 1, 10, 10, texture.flipY);
-        material.side = THREE.DoubleSide;
+        const geometry = (texture.flipY ? await chicletGeometry : await chicletGeometryFlipped).clone();
 
         this.mesh = new THREE.Mesh(geometry, material);
         this.mesh.castShadow = true;
@@ -1657,6 +1701,11 @@ AFRAME.registerComponent("media-pdf", {
 
     if (type === MEDIA_INTERACTION_TYPES.OPEN) {
       window.open(this.el.components["media-loader"].data.src);
+      return;
+    }
+
+    if (type === MEDIA_INTERACTION_TYPES.DOWN) {
+      groundMedia(this.el, true);
       return;
     }
 

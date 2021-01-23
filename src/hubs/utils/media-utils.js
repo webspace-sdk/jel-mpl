@@ -10,11 +10,16 @@ import { getNetworkedEntity, getNetworkId, ensureOwnership } from "../../jel/uti
 import { addVertexCurvingToShader } from "../../jel/systems/terrain-system";
 import { getMessages } from "../../hubs/utils/i18n";
 import { SOUND_MEDIA_REMOVED } from "../systems/sound-effects-system";
+import anime from "animejs";
+
+// We use the legacy 'text' regex since it matches some items like beach_umbrella
+// and thermometer which seem to not work with the default/standard regex
+import createEmojiRegex from "emoji-regex/text.js";
 
 import Linkify from "linkify-it";
 import tlds from "tlds";
 
-import anime from "animejs";
+const emojiRegex = createEmojiRegex();
 
 export const MEDIA_INTERACTION_TYPES = {
   PRIMARY: 0,
@@ -35,7 +40,26 @@ export const MEDIA_INTERACTION_TYPES = {
 export const LOADING_EVENTS = ["model-loading", "image-loading", "text-loading", "pdf-loading"];
 export const LOADED_EVENTS = ["model-loaded", "image-loaded", "text-loaded", "pdf-loaded"];
 export const ERROR_EVENTS = ["model-error", "image-error", "text-error", "pdf-error"];
-const MEDIA_VIEW_COMPONENTS = ["media-video", "media-image", "media-text", "media-pdf", "gltf-model-plus"];
+export const MEDIA_VIEW_COMPONENTS = [
+  "media-video",
+  "media-image",
+  "media-text",
+  "media-vox",
+  "media-pdf",
+  "media-emoji",
+  "gltf-model-plus"
+];
+
+export const PAGABLE_MEDIA_VIEW_COMPONENTS = ["media-video", "media-pdf"];
+export const BAKABLE_MEDIA_VIEW_COMPONENTS = ["media-video", "media-text", "media-pdf"];
+
+export const GROUNDABLE_MEDIA_VIEW_COMPONENTS = [
+  "gltf-model-plus",
+  "media-vox",
+  "media-image",
+  "media-pdf",
+  "media-emoji"
+];
 
 const linkify = Linkify();
 linkify.tlds(tlds);
@@ -181,14 +205,19 @@ export const addMedia = (
   mediaOptions = {},
   networked = true,
   parentEl = null,
-  linkedEl = null
+  linkedEl = null,
+  networkId = null,
+  showLoader = true
 ) => {
   const scene = AFRAME.scenes[0];
 
   const entity = document.createElement("a-entity");
+  const isVideoShare = src instanceof MediaStream;
 
   if (networked) {
-    entity.setAttribute("shared", { template: template });
+    const isPersistent = !isVideoShare;
+
+    entity.setAttribute(isPersistent ? "shared" : "networked", { template, networkId });
   } else {
     const templateBody = document
       .importNode(document.body.querySelector(template).content, true)
@@ -218,6 +247,14 @@ export const addMedia = (
       ? mediaPresentingSpace.components["shared-media"].data.selectedMediaLayer
       : 0;
 
+  let isEmoji = false;
+
+  if (contents) {
+    const trimmed = contents.trim();
+    const match = trimmed.match(emojiRegex);
+    isEmoji = match && match[0] === trimmed;
+  }
+
   entity.setAttribute("media-loader", {
     fitToBox,
     resolve,
@@ -225,6 +262,7 @@ export const addMedia = (
     src: typeof src === "string" && contents === null ? coerceToUrl(src) || src : "",
     initialContents: contents != null ? contents : null,
     addedLocally: true,
+    showLoader,
     version,
     contentSubtype,
     linkedEl,
@@ -232,7 +270,7 @@ export const addMedia = (
     mediaOptions
   });
 
-  if (contents) {
+  if (contents && !isEmoji) {
     window.APP.store.handleActivityFlag("mediaTextCreate");
   }
 
@@ -265,14 +303,16 @@ export const addMedia = (
         console.error("Media upload failed", e);
         entity.setAttribute("media-loader", { src: "error" });
       });
-  } else if (src instanceof MediaStream) {
-    entity.setAttribute("media-loader", { src: `jel://clients/${NAF.clientId}/video` });
+  } else if (isVideoShare) {
+    const selfVideoShareUrl = `jel://clients/${NAF.clientId}/video`;
+    entity.setAttribute("media-loader", { src: selfVideoShareUrl });
   } else if (contents !== null) {
     // If contents were set, update the src to reflect the media-text property that is bound.
     getNetworkedEntity(entity).then(el => {
-      entity.setAttribute("media-loader", {
-        src: `jel://entities/${getNetworkId(el)}/components/media-text/properties/deltaOps/contents`
-      });
+      const src = `jel://entities/${getNetworkId(el)}/components/${
+        isEmoji ? "media-emoji/properties/emoji" : "media-text/properties/deltaOps/contents"
+      }`;
+      entity.setAttribute("media-loader", { src });
     });
   }
 
@@ -286,11 +326,89 @@ export const addMedia = (
   return { entity, orientation };
 };
 
+// Animates the given object to the terrain ground.
+export const groundMedia = (sourceEl, faceUp) => {
+  const { object3D } = sourceEl;
+  const finalXRotation = faceUp ? (3.0 * Math.PI) / 2.0 : 0.0;
+  const px = object3D.rotation.x;
+  const pz = object3D.rotation.z;
+  object3D.rotation.x = finalXRotation;
+  object3D.rotation.z = 0.0;
+  object3D.traverse(o => (o.matrixNeedsUpdate = true));
+  object3D.updateMatrixWorld();
+
+  const bbox = new THREE.Box3();
+  bbox.expandByObject(object3D);
+
+  object3D.rotation.x = px;
+  object3D.rotation.z = pz;
+  object3D.traverse(o => (o.matrixNeedsUpdate = true));
+  object3D.updateMatrixWorld();
+
+  const objectHeight = bbox.max.y - bbox.min.y;
+
+  const x = object3D.position.x;
+  const z = object3D.position.z;
+
+  const terrainSystem = AFRAME.scenes[0].systems["hubs-systems"].terrainSystem;
+  const terrainHeight = terrainSystem.getTerrainHeightAtWorldCoord(x, z);
+  const finalYPosition = objectHeight * 0.5 + terrainHeight;
+
+  const step = (function() {
+    const lastValue = {};
+    return function(anim) {
+      const value = anim.animatables[0].target;
+
+      value.x = Math.max(Number.MIN_VALUE, value.x);
+      value.y = Math.max(Number.MIN_VALUE, value.y);
+      value.z = Math.max(Number.MIN_VALUE, value.z);
+
+      // For animation timeline.
+      if (value.x === lastValue.x && value.y === lastValue.y && value.z === lastValue.z) {
+        return;
+      }
+
+      lastValue.x = value.x;
+      lastValue.y = value.y;
+      lastValue.z = value.z;
+
+      object3D.rotation.x = value.x;
+      object3D.position.y = value.y;
+      object3D.rotation.z = value.z;
+      object3D.matrixNeedsUpdate = true;
+    };
+  })();
+
+  anime({
+    duration: 800,
+    easing: "easeOutElastic",
+    elasticity: 800,
+    loop: 0,
+    round: false,
+    x: finalXRotation,
+    y: finalYPosition,
+    z: 0.0,
+    targets: [{ x: object3D.rotation.x, y: object3D.position.y, z: object3D.rotation.z }],
+    update: anim => step(anim),
+    complete: anim => step(anim)
+  });
+};
+
 export const cloneMedia = (sourceEl, template, src = null, networked = true, link = false, parentEl = null) => {
   let contents = null;
+  const extraMediaOptions = {};
 
   if (sourceEl.components["media-text"]) {
-    contents = sourceEl.components["media-text"].getContents();
+    const mediaText = sourceEl.components["media-text"];
+    const { foregroundColor, backgroundColor, font } = mediaText.data;
+
+    contents = mediaText.getContents();
+    extraMediaOptions.foregroundColor = foregroundColor;
+    extraMediaOptions.backgroundColor = backgroundColor;
+    extraMediaOptions.font = font;
+  } else if (sourceEl.components["media-emoji"]) {
+    const mediaEmoji = sourceEl.components["media-emoji"];
+    contents = mediaEmoji.data.emoji;
   } else {
     if (!src) {
       ({ src } = sourceEl.components["media-loader"].data);
@@ -307,8 +425,8 @@ export const cloneMedia = (sourceEl, template, src = null, networked = true, lin
     contentSubtype,
     true,
     fitToBox,
-    false,
-    mediaOptions,
+    true,
+    { ...mediaOptions, ...extraMediaOptions },
     networked,
     parentEl,
     link ? sourceEl : null
@@ -650,7 +768,9 @@ export function removeMediaElement(el) {
     window.APP.hubChannel.setFileInactive(fileId);
   }
 
-  el.parentNode.removeChild(el);
+  if (el.parentNode) {
+    el.parentNode.removeChild(el);
+  }
 }
 
 export function getMediaViewComponent(el) {
@@ -683,3 +803,32 @@ export function performAnimatedRemove(el, callback) {
     }, 500);
   });
 }
+
+const spawnMediaInFrontOffset = { x: 0, y: 0, z: -1.5 };
+
+export const spawnMediaInfrontOfPlayer = (src, contents, contentOrigin, contentSubtype = null, mediaOptions = null) => {
+  if (!window.APP.hubChannel.can("spawn_and_move_media")) return;
+  if (src instanceof File && !window.APP.hubChannel.can("upload_files")) return;
+
+  const { entity, orientation } = addMedia(
+    src,
+    contents,
+    "#interactable-media",
+    contentOrigin,
+    contentSubtype,
+    !!(src && !(src instanceof MediaStream)),
+    true,
+    true,
+    mediaOptions
+  );
+
+  orientation.then(or => {
+    entity.setAttribute("offset-relative-to", {
+      target: "#avatar-pov-node",
+      offset: spawnMediaInFrontOffset,
+      orientation: or
+    });
+  });
+
+  return entity;
+};

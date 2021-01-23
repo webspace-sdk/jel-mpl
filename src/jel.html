@@ -14,8 +14,14 @@
     <meta name="mobile-web-app-capable" content="yes">
     <title>Room | App by Company</title>
     <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;700;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@400;700;900&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Raleway:wght@600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Comic+Neue:wght@400;700&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Inconsolata&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Bangers&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Indie+Flower&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Sriracha&display=swap" rel="stylesheet">
     <!-- Google Analytics -->
     <!-- NOTE GA tracking is disabled by default. You'll need to set the GA_TRACKING_ID build variable to enable it. -->
     <script>
@@ -60,6 +66,10 @@
             <img id="presence-count" crossorigin="anonymous" src="./assets/hubs/hud/presence-count.png">
             <img id="action-button" crossorigin="anonymous" src="./assets/hubs/hud/action_button.9.png">
             <img id="button" crossorigin="anonymous" src="./assets/hubs/hud/button.9.png">
+            <img id="video-play" crossorigin="anonymous" src="./assets/hubs/video-overlay/play.png">
+            <img id="video-play-hover" crossorigin="anonymous" src="./assets/hubs/video-overlay/play-hover.png">
+            <img id="video-pause" crossorigin="anonymous" src="./assets/hubs/video-overlay/pause.png">
+            <img id="video-pause-hover" crossorigin="anonymous" src="./assets/hubs/video-overlay/pause-hover.png">
 
             <a-asset-item id="drawing-pen" response-type="arraybuffer" src="./assets/hubs/models/DrawingPen.glb"></a-asset-item>
             <a-asset-item id="spawn-point" response-type="arraybuffer" src="./assets/hubs/models/spawn-point.glb"></a-asset-item>
@@ -68,33 +78,6 @@
                 <a-entity shared-media></a-entity>
             </template>
 
-            <template id="template-waypoint-avatar">
-                <a-entity waypoint></a-entity>
-            </template>
-
-            <template id="occupiable-waypoint-icon">
-                <a-entity
-                    is-remote-hover-target
-                    class="occupiable-waypoint-icon"
-                    tags="singleActionButton: true"
-                    sprite="name: spawn-point.png">
-                </a-entity>
-            </template>
-            <template id="teleport-waypoint-icon">
-                <a-entity
-                    is-remote-hover-target
-                    class="teleport-waypoint-icon"
-                    tags="singleActionButton: true"
-                    sprite="name: spawn-point.png">
-                </a-entity>
-            </template>
-            <template id="waypoint-preview-avatar-template">
-                <a-entity
-                    overwrite-raycast-as-noop
-                    class="waypoint-preview-avatar"
-                    gltf-model-plus="inflate: true; src: #spawn-point;">
-                </a-entity>
-            </template>
             <template id="remote-avatar">
                 <a-entity networked-avatar ik-root player-info wrapped-entity visible="false">
                     <a-entity class="camera"></a-entity>
@@ -161,8 +144,8 @@
                             <a-entity
                                 avatar-audio-source="rolloffFactor: 2.0;"
                                 personal-space-invader="radius: 0.15; useMaterial: true;"
-                                body-helper="type: kinematic; collisionFilterGroup: 4; collisionFilterMask: 1;"
-                                shape-helper="type: cylinder; fit: manual; halfExtents: 0.11 0.10 0.11; offset: 0 0.06 0.04;"
+                                body-helper="type: kinematic; collisionFilterGroup: 4; collisionFilterMask: 17;"
+                                shape-helper="type: sphere; fit: manual; sphereRadius: 0.5;"
                             ></a-entity>
                         </template>
 
@@ -179,7 +162,7 @@
 
             <template id="static-media">
                 <a-entity
-                    body-helper="type: static; mass: 1; collisionFilterGroup: 1; collisionFilterMask: 1;"
+                    body-helper="type: static; mass: 1; collisionFilterGroup: 1; collisionFilterMask: 17;"
                 >
                 </a-entity>
             </template>
@@ -187,7 +170,7 @@
             <template id="static-controlled-media">
                 <a-entity
                     class="interactable"
-                    body-helper="type: static; mass: 1; collisionFilterGroup: 1; collisionFilterMask: 1;"
+                    body-helper="type: static; mass: 1; collisionFilterGroup: 1; collisionFilterMask: 17;"
                     is-remote-hover-target
                     position-at-box-shape-border__freeze="target:.freeze-menu;"
                     tags="isStatic: true; togglesHoveredActionSet: true; inspectable: true;"
@@ -199,15 +182,15 @@
             <template id="interactable-media">
                 <a-entity
                     class="interactable"
-                    body-helper="type: dynamic; mass: 1; collisionFilterGroup: 1; collisionFilterMask: 15;"
+                    body-helper="type: dynamic; mass: 1; collisionFilterGroup: 1; collisionFilterMask: 31;"
                     set-unowned-body-kinematic
                     is-remote-hover-target
                     tags="isHandCollisionTarget: true; isHoldable: true; offersHandConstraint: true; offersRemoteConstraint: true; inspectable: true;"
                     destroy-at-extreme-distances
                     scalable-when-grabbed
-                    floaty-object="modifyGravityOnRelease: true; autoLockOnLoad: true;"
+                    floaty-object="gravitySpeedLimit: 0; modifyGravityOnRelease: true; autoLockOnLoad: true;"
                     set-yxz-order
-                    hoverable-visuals
+                    hoverable-visuals="enableSweepingEffect: false"
                     listed-media
                     use-audio-system-settings
                     wrapped-entity
@@ -218,7 +201,7 @@
             <template id="linked-media">
                 <a-entity
                     class="interactable"
-                    body-helper="type: dynamic; mass: 1; collisionFilterGroup: 1; collisionFilterMask: 15;"
+                    body-helper="type: dynamic; mass: 1; collisionFilterGroup: 1; collisionFilterMask: 31;"
                     is-remote-hover-target
                     tags="togglesHoveredActionSet: true; inspectable: true;"
                     set-unowned-body-kinematic
@@ -232,7 +215,7 @@
             <template id="interactable-pen">
                 <a-entity
                     class="pen interactable"
-                    body-helper="type: dynamic; mass: 0.001; collisionFilterGroup: 1; collisionFilterMask: 15; gravity: 0 0 0;"
+                    body-helper="type: dynamic; mass: 0.001; collisionFilterGroup: 1; collisionFilterMask: 31; gravity: 0 0 0;"
                     gltf-model-plus="src: #drawing-pen; inflate: true;"
                     owned-object-limiter="counter: #pen-counter"
                     set-unowned-body-kinematic
@@ -300,8 +283,16 @@
 
             <template id="video-hover-menu">
                 <a-entity class="ui interactable-ui hover-container" visible="false">
-                    <a-entity class="video-time-label" text="value: 0; anchor: center; align: center; color: #aaa;" text-raycast-hack position="0 -0.24 0" scale="0.75 0.75 0.75"></a-entity>
-                    <a-entity class="video-volume-label" text="value: 0%; anchor: center; align: center; color: #ccc; letterSpacing: 4;" text-raycast-hack position="0.0 0.14 0.0015" scale="1.25 1.25 1.25"></a-entity>
+                    <a-entity class="video-volume-label" text="value: 0%; anchor: center; align: center; color: #ccc; letterSpacing: 4;" text-raycast-hack position="0.0 0.20 0.0015" scale="1.0 1.0 1.0"></a-entity>
+                    <a-entity class="video-time-label" text="value: 0; anchor: center; align: center; color: #aaa;" text-raycast-hack position="0.35 -0.24 0" scale="0.75 0.75 0.75"></a-entity>
+                    <a-image
+                        is-remote-hover-target
+                        tags="singleActionButton: true; isHoverMenuChild: true;"
+                        icon-button="image: #video-pause; hoverImage: #video-pause-hover; activeImage: #video-play; activeHoverImage: #video-play-hover"
+                        scale="0.1 0.1 0.1"
+                        position="-0.40 -0.21 0.005"
+                        class="ui video-playpause-button"
+                    ></a-image>
                 </a-entity>
             </template>
 
@@ -463,11 +454,6 @@
                 set-yxz-order
                 position="0 1.6 0"
             >
-                <a-entity
-                    id="gaze-teleport"
-                    position = "0.15 0 0"
-                    teleporter="start: /actions/startTeleport; confirm: /actions/stopTeleport; collisionEntities: [nav-mesh];"
-                ></a-entity>
             </a-entity>
 
             <a-entity
@@ -568,6 +554,12 @@
     <div id="ui-root"></div>
     <div id="nav-drag-target"></div>
     <div id="presence-drag-target"></div>
+
+    <div id="gaze-cursor">
+        <div class="cursor"></div>
+    </div>
+
+    <img src="https://assets.jel.app/static/emoji/emoji-map-64.png" style="display: none" width="0" height="0"/>
 </body>
 
 </html>

@@ -136,7 +136,8 @@ export const guessContentType = url => {
   if (!url) return;
   if (url.startsWith("jel://") && url.endsWith("/components/media-text/properties/deltaOps/contents"))
     return "text/html";
-  if (url.startsWith("jel://") && url.endsWith("/video")) return "video/vnd.hubs-webrtc";
+  if (url.startsWith("jel://") && url.endsWith("/components/media-emoji/properties/emoji")) return "text/html";
+  if (url.startsWith("jel://") && url.endsWith("/video")) return "video/vnd.jel-webrtc";
   if (url.startsWith("data:")) {
     const matches = dataUrlRegex.exec(url);
     if (matches.length > 0) {
@@ -195,3 +196,21 @@ export const idForAvatarUrl = url => {
   }
   return null;
 };
+
+export function emojiUnicode(characters, prefix = "") {
+  return [...characters]
+    .reduce((accumulator, character) => {
+      const unicode = character.codePointAt(undefined).toString(16);
+      accumulator.push(`${prefix}${unicode}`);
+      return accumulator;
+    }, [])
+    .join("-")
+    .toUpperCase();
+}
+
+const EMOJI_IMAGE_URL = "https://assets.jel.app/static/emoji";
+
+export function imageUrlForEmoji(emoji, resolution) {
+  const unicode = emojiUnicode(emoji).toUpperCase();
+  return `${EMOJI_IMAGE_URL}/${unicode}-${resolution}.png`;
+}

@@ -24,6 +24,8 @@ export const SCHEMA = {
       additionalProperties: false,
       properties: {
         spaceId: { type: "string" },
+        lastJoinedHubId: { type: "string" }, // Deprecated
+        lastJoinedHubIds: { type: "object" },
         isFirstVisitToSpace: { type: "boolean" }, // true the very first time a space is visited, for initial setup
         isSpaceCreator: { type: "boolean" } // true if this user ever created a space on this device
       }
@@ -66,12 +68,14 @@ export const SCHEMA = {
         avatarEdit: { type: "boolean" },
         showInvite: { type: "boolean" },
         rightDrag: { type: "boolean" },
+        narrowMouseLook: { type: "boolean" },
         rotated: { type: "boolean" },
         scaled: { type: "boolean" },
         mediaTextEdit: { type: "boolean" },
         mediaTextEditClose: { type: "boolean" },
         mediaTextCreate: { type: "boolean" },
-        mediaRemove: { type: "boolean" }
+        mediaRemove: { type: "boolean" },
+        chat: { type: "boolean" }
       }
     },
 
@@ -81,6 +85,24 @@ export const SCHEMA = {
       properties: {
         preferredMicDeviceId: { type: "string" },
         hideKeyTips: { type: "boolean" }
+      }
+    },
+
+    equips: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        launcher: { type: "string" },
+        launcherSlot1: { type: "string" },
+        launcherSlot2: { type: "string" },
+        launcherSlot3: { type: "string" },
+        launcherSlot4: { type: "string" },
+        launcherSlot5: { type: "string" },
+        launcherSlot6: { type: "string" },
+        launcherSlot7: { type: "string" },
+        launcherSlot8: { type: "string" },
+        launcherSlot9: { type: "string" },
+        launcherSlot10: { type: "string" }
       }
     },
 
@@ -146,7 +168,8 @@ export const SCHEMA = {
       additionalProperties: false,
       properties: {
         navPanelWidth: { type: "number" },
-        presencePanelWidth: { type: "number" }
+        presencePanelWidth: { type: "number" },
+        mediaTextColorPresetIndex: { type: "number" }
       }
     },
 
@@ -170,6 +193,7 @@ export const SCHEMA = {
     credentials: { $ref: "#/definitions/credentials" },
     activity: { $ref: "#/definitions/activity" },
     settings: { $ref: "#/definitions/settings" },
+    equips: { $ref: "#/definitions/equips" },
     preferences: { $ref: "#/definitions/preferences" },
     uiState: { $ref: "#/definitions/uiState" },
     embedTokens: { $ref: "#/definitions/embedTokens" },
@@ -199,6 +223,7 @@ export default class Store extends EventTarget {
       context: {},
       activity: {},
       settings: {},
+      equips: {},
       credentials: {},
       profile: {},
       embedTokens: [],
@@ -246,6 +271,24 @@ export default class Store extends EventTarget {
     if (!this.state.activity.hasChangedName) {
       this.update({ profile: { displayName: generateRandomName() } });
     }
+
+    if (!this.state.equips.launcher) {
+      this.update({
+        equips: {
+          launcher: "😀",
+          launcherSlot1: "😀",
+          launcherSlot2: "😂",
+          launcherSlot3: "🤔",
+          launcherSlot4: "😍",
+          launcherSlot5: "😘",
+          launcherSlot6: "🥺",
+          launcherSlot7: "😭",
+          launcherSlot8: "👍",
+          launcherSlot9: "👏",
+          launcherSlot10: "❤"
+        }
+      });
+    }
   };
 
   resetToRandomDefaultAvatar = async () => {
@@ -292,6 +335,12 @@ export default class Store extends EventTarget {
     this.clearOnLoadActions();
   }
 
+  setLastJoinedHubId(spaceId, hubId) {
+    const lastJoinedHubIds = this.state.context.lastJoinedHubIds || {};
+    lastJoinedHubIds[spaceId] = hubId;
+    this.update({ context: { lastJoinedHubIds } });
+  }
+
   clearOnLoadActions() {
     this.clearStoredArray("onLoadActions");
   }
@@ -323,7 +372,12 @@ export default class Store extends EventTarget {
     if (newState.context !== undefined) {
       this.dispatchEvent(new CustomEvent("contextchanged"));
     }
+
     this.dispatchEvent(new CustomEvent("statechanged"));
+
+    for (const key of Object.keys(newState)) {
+      this.dispatchEvent(new CustomEvent(`statechanged-${key}`));
+    }
 
     return finalState;
   }

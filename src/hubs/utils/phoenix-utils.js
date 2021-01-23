@@ -79,7 +79,7 @@ export async function invalidateReticulumMeta() {
   reticulumMeta = null;
 }
 
-export async function connectToReticulum(debug = false, params = null, socketClass = Socket) {
+export async function connectToReticulum(debug = false, params = null, socketClass = Socket, existingSocket = null) {
   const qs = new URLSearchParams(location.search);
 
   const getNewSocketUrl = async () => {
@@ -104,23 +104,29 @@ export async function connectToReticulum(debug = false, params = null, socketCla
     };
   }
 
-  if (params) {
-    socketSettings.params = params;
+  let socket = existingSocket;
+
+  if (!socket) {
+    if (params) {
+      socketSettings.params = params;
+    }
+
+    socket = new socketClass(`${socketUrl}/socket`, socketSettings);
+
+    socket.onError(async () => {
+      // On error, underlying reticulum node may have died, so rebalance by
+      // fetching a new healthy node to connect to.
+      invalidateReticulumMeta();
+
+      const endPointPath = new URL(socket.endPoint).pathname;
+      const newSocketUrl = await getNewSocketUrl();
+      const newEndPoint = `${newSocketUrl}${endPointPath}`;
+      console.log(`Socket error, changed endpoint to ${newEndPoint}`);
+      socket.endPoint = newEndPoint;
+    });
   }
 
-  const socket = new socketClass(`${socketUrl}/socket`, socketSettings);
   socket.connect();
-  socket.onError(async () => {
-    // On error, underlying reticulum node may have died, so rebalance by
-    // fetching a new healthy node to connect to.
-    invalidateReticulumMeta();
-
-    const endPointPath = new URL(socket.endPoint).pathname;
-    const newSocketUrl = await getNewSocketUrl();
-    const newEndPoint = `${newSocketUrl}${endPointPath}`;
-    console.log(`Socket error, changed endpoint to ${newEndPoint}`);
-    socket.endPoint = newEndPoint;
-  });
 
   return socket;
 }
@@ -181,13 +187,47 @@ export async function createSpace(name) {
   return res;
 }
 
-export async function createHub(spaceId, name, sceneId) {
+export async function createHub(
+  spaceId,
+  name,
+  template,
+  worldType = null,
+  worldSeed = null,
+  spawnPosition = null,
+  spawnRotation = null,
+  spawnRadius = null
+) {
   const store = window.APP.store;
   const createUrl = getReticulumFetchUrl("/api/v1/hubs");
   const payload = { hub: { name, space_id: spaceId } };
 
-  if (sceneId) {
-    payload.hub.scene_id = sceneId;
+  if (template) {
+    payload.hub.template = template;
+  }
+
+  if (worldType !== null) {
+    payload.hub.world_type = worldType;
+  }
+
+  if (worldSeed !== null) {
+    payload.hub.world_seed = worldSeed;
+  }
+
+  if (spawnPosition != null) {
+    payload.hub.spawn_position_x = spawnPosition.x;
+    payload.hub.spawn_position_y = spawnPosition.y;
+    payload.hub.spawn_position_z = spawnPosition.z;
+  }
+
+  if (spawnRotation != null) {
+    payload.hub.spawn_rotation_x = spawnRotation.x;
+    payload.hub.spawn_rotation_y = spawnRotation.y;
+    payload.hub.spawn_rotation_z = spawnRotation.z;
+    payload.hub.spawn_rotation_w = spawnRotation.w;
+  }
+
+  if (spawnRadius != null) {
+    payload.hub.spawn_radius = spawnRadius;
   }
 
   const headers = { "content-type": "application/json" };
@@ -267,39 +307,4 @@ export function unbindPresence(presence) {
     presence.onSync(presenceBindings.onSync);
     return presence;
   };
-}
-
-// Takes the given channel, and creates a new channel with the same bindings
-// with the given socket, joins it, and leaves the old channel after joining.
-//
-// NOTE: This function relies upon phoenix channel object internals, so this
-// function will need to be reviewed if/when we ever update phoenix.js
-export function migrateChannelToSocket(oldChannel, socket, params) {
-  const channel = socket.channel(oldChannel.topic, params || oldChannel.params);
-
-  for (let i = 0, l = oldChannel.bindings.length; i < l; i++) {
-    const item = oldChannel.bindings[i];
-    channel.on(item.event, item.callback);
-  }
-
-  for (let i = 0, l = oldChannel.pushBuffer.length; i < l; i++) {
-    const item = oldChannel.pushBuffer[i];
-    channel.push(item.event, item.payload, item.timeout);
-  }
-
-  const oldJoinPush = oldChannel.joinPush;
-  const joinPush = channel.join();
-
-  for (let i = 0, l = oldJoinPush.recHooks.length; i < l; i++) {
-    const item = oldJoinPush.recHooks[i];
-    joinPush.receive(item.status, item.callback);
-  }
-
-  return new Promise(resolve => {
-    joinPush.receive("ok", () => {
-      // Clear all event handlers first so no duplicate messages come in.
-      oldChannel.bindings = [];
-      resolve(channel);
-    });
-  });
 }

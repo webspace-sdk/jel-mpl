@@ -7,7 +7,8 @@ import {
   getDefaultResolveQuality,
   injectCustomShaderChunks,
   addMeshScaleAnimation,
-  closeExistingMediaMirror
+  closeExistingMediaMirror,
+  MEDIA_VIEW_COMPONENTS
 } from "../utils/media-utils";
 import {
   isNonCorsProxyDomain,
@@ -51,6 +52,8 @@ AFRAME.registerComponent("media-loader", {
     contentSubtype: { default: null },
     mediaLayer: { default: null },
     addedLocally: { default: false },
+    showLoader: { default: false },
+    animate: { default: true },
     linkedEl: { default: null }, // This is the element of which this is a linked derivative. See linked-media.js
     mediaOptions: {
       default: {},
@@ -170,13 +173,9 @@ AFRAME.registerComponent("media-loader", {
   },
 
   onError() {
-    this.el.removeAttribute("gltf-model-plus");
-    this.el.removeAttribute("media-pager");
-    this.el.removeAttribute("media-video");
-    this.el.removeAttribute("media-pdf");
-    this.el.removeAttribute("media-text");
-    this.el.setAttribute("media-image", { src: "error" });
+    this.setToSingletonMediaComponent("media-image", { src: "error" });
     this.cleanupLoader(true);
+    this.el.emit("media-loader-failed");
   },
 
   async showLoader() {
@@ -213,7 +212,7 @@ AFRAME.registerComponent("media-loader", {
 
     this.updateScale(true, false);
 
-    if (this.el.sceneEl.is("entered") && this.data.addedLocally) {
+    if (this.el.sceneEl.is("entered") && this.data.showLoader) {
       this.loadingSoundEffect = this.el.sceneEl.systems["hubs-systems"].soundEffectsSystem.playPositionalSoundFollowing(
         SOUND_MEDIA_LOADING,
         this.el.object3D,
@@ -281,7 +280,7 @@ AFRAME.registerComponent("media-loader", {
     const el = this.el;
     this.cleanupLoader();
 
-    if (this.el.sceneEl.is("entered") && this.data.addedLocally) {
+    if (this.el.sceneEl.is("entered") && this.data.showLoader && this.data.animate) {
       this.loadedSoundEffect = this.el.sceneEl.systems["hubs-systems"].soundEffectsSystem.playPositionalSoundFollowing(
         SOUND_MEDIA_LOADED,
         this.el.object3D,
@@ -309,7 +308,7 @@ AFRAME.registerComponent("media-loader", {
       el.emit("media-loaded");
     };
 
-    if (this.data.addedLocally) {
+    if (this.data.showLoader && this.data.animate) {
       if (!this.animating) {
         this.animating = true;
         if (shouldUpdateScale) this.updateScale(this.data.fitToBox, this.data.moveTheParentNotTheMesh);
@@ -348,16 +347,11 @@ AFRAME.registerComponent("media-loader", {
     }
 
     if (forceLocalRefresh) {
-      this.el.removeAttribute("gltf-model-plus");
-      this.el.removeAttribute("media-pager");
-      this.el.removeAttribute("media-video");
-      this.el.removeAttribute("media-pdf");
-      this.el.removeAttribute("media-image");
-      this.el.removeAttribute("media-text");
+      this.clearMediaComponents();
     }
 
     try {
-      if ((forceLocalRefresh || mediaChanged) && !this.showLoaderTimeout && this.data.addedLocally) {
+      if ((forceLocalRefresh || mediaChanged) && !this.showLoaderTimeout && this.data.showLoader) {
         // Delay loader so we don't do it if media is locally cached, etc.
         this.showLoaderTimeout = setTimeout(this.showLoader, 100);
       }
@@ -425,15 +419,30 @@ AFRAME.registerComponent("media-loader", {
       this.el.addEventListener("media-load-error", () => this.cleanupLoader());
 
       if (src.startsWith("jel://entities/") && src.includes("/components/media-text")) {
-        this.el.removeAttribute("gltf-model-plus");
-        this.el.removeAttribute("media-image");
-        this.el.removeAttribute("media-video");
-        this.el.removeAttribute("media-pdf");
-        this.el.removeAttribute("media-pager");
-
         this.el.addEventListener("text-loaded", () => this.onMediaLoaded(SHAPE.BOX), { once: true });
 
-        this.el.setAttribute("media-text", { src: accessibleUrl });
+        const fitContent = contentSubtype !== "page";
+        const transparent = contentSubtype === "banner";
+        const properties = { src: accessibleUrl, fitContent, transparent };
+        const mediaOptions = this.data.mediaOptions;
+
+        if (mediaOptions.foregroundColor) {
+          properties.foregroundColor = mediaOptions.foregroundColor;
+        }
+
+        if (mediaOptions.backgroundColor) {
+          properties.backgroundColor = mediaOptions.backgroundColor;
+        }
+
+        if (mediaOptions.font) {
+          properties.font = mediaOptions.font;
+        }
+
+        this.setToSingletonMediaComponent("media-text", properties);
+      } else if (src.startsWith("jel://entities/") && src.includes("/components/media-emoji")) {
+        this.el.addEventListener("model-loaded", () => this.onMediaLoaded(SHAPE.BOX), { once: true });
+
+        this.setToSingletonMediaComponent("media-emoji", { src: accessibleUrl });
       } else if (
         contentType.startsWith("video/") ||
         contentType.startsWith("audio/") ||
@@ -449,13 +458,15 @@ AFRAME.registerComponent("media-loader", {
           linkedMediaElementAudioSource = linkedMediaVideo.mediaElementAudioSource;
         }
 
-        const qsTime = parseInt(parsedUrl.searchParams.get("t"));
-        const hashTime = parseInt(new URLSearchParams(parsedUrl.hash.substring(1)).get("t"));
-        const startTime = hashTime || qsTime || 0;
-        this.el.removeAttribute("gltf-model-plus");
-        this.el.removeAttribute("media-image");
-        this.el.removeAttribute("media-text");
-        this.el.removeAttribute("media-pdf");
+        let startTime = null;
+
+        // When adding a new video, parse the initial time
+        if (this.data.addedLocally && this.data.mediaOptions.time === undefined) {
+          const qsTime = parseInt(parsedUrl.searchParams.get("t"));
+          const hashTime = parseInt(new URLSearchParams(parsedUrl.hash.substring(1)).get("t"));
+          startTime = hashTime || qsTime || 0;
+        }
+
         this.el.setAttribute("floaty-object", { reduceAngularFloat: true, releaseGravity: -1 });
         this.el.addEventListener(
           "video-loaded",
@@ -464,18 +475,27 @@ AFRAME.registerComponent("media-loader", {
           },
           { once: true }
         );
-        this.el.setAttribute(
-          "media-video",
-          Object.assign({}, this.data.mediaOptions, {
-            src: accessibleUrl,
-            audioSrc: canonicalAudioUrl ? proxiedUrlFor(canonicalAudioUrl) : null,
-            time: startTime,
-            contentType,
-            linkedVideoTexture,
-            linkedAudioSource,
-            linkedMediaElementAudioSource
-          })
-        );
+
+        const videoAttributes = Object.assign({}, this.data.mediaOptions, {
+          src: accessibleUrl,
+          audioSrc: canonicalAudioUrl ? proxiedUrlFor(canonicalAudioUrl) : null,
+          contentType,
+          linkedVideoTexture,
+          linkedAudioSource,
+          linkedMediaElementAudioSource
+        });
+
+        if (startTime !== null) {
+          videoAttributes.time = startTime;
+        }
+
+        this.setToSingletonMediaComponent("media-video", videoAttributes);
+
+        // Add the media-stream component to any entity that is streaming this client's video stream.
+        if (contentType === "video/vnd.jel-webrtc" && src.indexOf(NAF.clientId)) {
+          this.el.setAttribute("media-stream", {});
+        }
+
         if (this.el.components["position-at-border__freeze"]) {
           this.el.setAttribute("position-at-border__freeze", { isFlat: true });
         }
@@ -483,11 +503,6 @@ AFRAME.registerComponent("media-loader", {
           this.el.setAttribute("position-at-border__freeze-unprivileged", { isFlat: true });
         }
       } else if (contentType.startsWith("image/")) {
-        this.el.removeAttribute("gltf-model-plus");
-        this.el.removeAttribute("media-video");
-        this.el.removeAttribute("media-text");
-        this.el.removeAttribute("media-pdf");
-        this.el.removeAttribute("media-pager");
         this.el.addEventListener(
           "image-loaded",
           e => {
@@ -507,7 +522,7 @@ AFRAME.registerComponent("media-loader", {
         if (typeof this.data.mediaOptions.batch !== "undefined" && !this.data.mediaOptions.batch) {
           batch = false;
         }
-        this.el.setAttribute(
+        this.setToSingletonMediaComponent(
           "media-image",
           Object.assign({}, this.data.mediaOptions, {
             src: accessibleUrl,
@@ -524,11 +539,7 @@ AFRAME.registerComponent("media-loader", {
           this.el.setAttribute("position-at-border__freeze-unprivileged", { isFlat: true });
         }
       } else if (contentType.startsWith("application/pdf")) {
-        this.el.removeAttribute("gltf-model-plus");
-        this.el.removeAttribute("media-video");
-        this.el.removeAttribute("media-text");
-        this.el.removeAttribute("media-image");
-        this.el.setAttribute(
+        this.setToSingletonMediaComponent(
           "media-pdf",
           Object.assign({}, this.data.mediaOptions, {
             src: accessibleUrl,
@@ -558,11 +569,6 @@ AFRAME.registerComponent("media-loader", {
         contentType.includes("x-zip-compressed") ||
         contentType.startsWith("model/gltf")
       ) {
-        this.el.removeAttribute("media-image");
-        this.el.removeAttribute("media-video");
-        this.el.removeAttribute("media-text");
-        this.el.removeAttribute("media-pdf");
-        this.el.removeAttribute("media-pager");
         this.el.addEventListener(
           "model-loaded",
           () => {
@@ -576,7 +582,8 @@ AFRAME.registerComponent("media-loader", {
         if (typeof this.data.mediaOptions.batch !== "undefined" && !this.data.mediaOptions.batch) {
           batch = false;
         }
-        this.el.setAttribute(
+        this.el.setAttribute("floaty-object", { gravitySpeedLimit: 1.85 });
+        this.setToSingletonMediaComponent(
           "gltf-model-plus",
           Object.assign({}, this.data.mediaOptions, {
             src: accessibleUrl,
@@ -587,12 +594,23 @@ AFRAME.registerComponent("media-loader", {
             modelToWorldScale: this.data.fitToBox ? 0.0001 : 1.0
           })
         );
+      } else if (contentType.startsWith("model/vox")) {
+        this.el.addEventListener(
+          "model-loaded",
+          () => {
+            this.onMediaLoaded(SHAPE.HULL, true);
+          },
+          { once: true }
+        );
+        this.el.addEventListener("model-error", this.onError, { once: true });
+        this.el.setAttribute("floaty-object", { gravitySpeedLimit: 1.85 });
+        this.setToSingletonMediaComponent(
+          "media-vox",
+          Object.assign({}, this.data.mediaOptions, {
+            src: accessibleUrl
+          })
+        );
       } else if (contentType.startsWith("text/html")) {
-        this.el.removeAttribute("gltf-model-plus");
-        this.el.removeAttribute("media-video");
-        this.el.removeAttribute("media-text");
-        this.el.removeAttribute("media-pdf");
-        this.el.removeAttribute("media-pager");
         this.el.addEventListener(
           "image-loaded",
           async () => {
@@ -620,7 +638,7 @@ AFRAME.registerComponent("media-loader", {
         if (typeof this.data.mediaOptions.batch !== "undefined" && !this.data.mediaOptions.batch) {
           batch = false;
         }
-        this.el.setAttribute(
+        this.setToSingletonMediaComponent(
           "media-image",
           Object.assign({}, this.data.mediaOptions, {
             src: thumbnail,
@@ -638,6 +656,8 @@ AFRAME.registerComponent("media-loader", {
       } else {
         throw new Error(`Unsupported content type: ${contentType}`);
       }
+
+      this.el.emit("media-view-added");
     } catch (e) {
       if (this.el.components["position-at-border__freeze"]) {
         this.el.setAttribute("position-at-border__freeze", { isFlat: true });
@@ -650,11 +670,36 @@ AFRAME.registerComponent("media-loader", {
     }
   },
 
+  setToSingletonMediaComponent(attr, properties) {
+    for (const component of MEDIA_VIEW_COMPONENTS) {
+      if (attr === component) continue;
+      this.el.removeAttribute(component);
+    }
+
+    if (attr !== "media-pdf") {
+      this.el.removeAttribute("media-pager");
+    }
+
+    this.el.setAttribute(attr, properties);
+  },
+
+  clearMediaComponents() {
+    for (const component of MEDIA_VIEW_COMPONENTS) {
+      this.el.removeAttribute(component);
+    }
+
+    this.el.removeAttribute("media-pager");
+  },
+
   consumeInitialContents: function() {
     if (!this.data.initialContents) return;
 
     const contents = this.data.initialContents;
     this.el.setAttribute("media-loader", { initialContents: null });
+
+    // To avoid race conditions, blank it out immediately
+    this.data.initialContents = null;
+
     return contents;
   }
 });

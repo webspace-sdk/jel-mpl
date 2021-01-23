@@ -3,6 +3,7 @@ import "./hubs/utils/theme";
 import "@babel/polyfill";
 import "./hubs/utils/debug-log";
 import { isInQuillEditor } from "./jel/utils/quill-utils";
+import { CURSOR_LOCK_STATES, getCursorLockState } from "./jel/utils/dom-utils";
 import mixpanel from "mixpanel-browser";
 
 console.log(`App version: ${process.env.BUILD_VERSION || "?"}`);
@@ -63,7 +64,10 @@ import "./hubs/components/visibility-on-content-types";
 import "./hubs/components/visibility-while-frozen";
 import "./hubs/components/networked-avatar";
 import "./hubs/components/media-views";
+import "./jel/components/media-vox";
 import "./jel/components/media-text";
+import "./jel/components/media-emoji";
+import "./jel/components/media-stream";
 import { initQuillPool } from "./jel/utils/quill-pool";
 import "./hubs/components/avatar-volume-controls";
 import "./hubs/components/pinch-to-move";
@@ -125,7 +129,6 @@ import { disableiOSZoom } from "./hubs/utils/disable-ios-zoom";
 import { getHubIdFromHistory, getSpaceIdFromHistory } from "./jel/utils/jel-url-utils";
 import { handleExitTo2DInterstitial, exit2DInterstitialAndEnterVR } from "./hubs/utils/vr-interstitial";
 import { getAvatarSrc } from "./hubs/utils/avatar-utils.js";
-import MessageDispatch from "./hubs/message-dispatch";
 import SceneEntryManager from "./hubs/scene-entry-manager";
 
 import "./hubs/systems/nav";
@@ -150,8 +153,8 @@ import "./hubs/systems/camera-rotator-system";
 import "./jel/systems/media-presence-system";
 import "./jel/systems/wrapped-entity-system";
 import { registerWrappedEntityPositionNormalizers } from "./jel/systems/wrapped-entity-system";
-import { SOUND_CHAT_MESSAGE } from "./hubs/systems/sound-effects-system";
 import { isInEditableField } from "./jel/utils/dom-utils";
+import { resetTemplate } from "./jel/utils/template-utils";
 
 import "./hubs/gltf-component-mappings";
 
@@ -181,8 +184,6 @@ window.APP.hubMetadata = hubMetadata;
 window.APP.spaceMetadata = spaceMetadata;
 
 store.addEventListener("profilechanged", spaceChannel.sendProfileUpdate.bind(hubChannel));
-
-const mediaSearchStore = window.APP.mediaSearchStore;
 
 const qs = new URLSearchParams(location.search);
 
@@ -533,7 +534,19 @@ function addGlobalEventListeners(scene, entryManager) {
         }
         break;
       case "page":
-        scene.emit("add_media_contents", "");
+        scene.emit("add_media_text", "page");
+        break;
+      case "label":
+        scene.emit("add_media_text", "label");
+        break;
+      case "banner":
+        scene.emit("add_media_text", "banner");
+        break;
+      case "voxmoji":
+        scene.emit("action_show_emoji_picker", "");
+        break;
+      case "screen":
+        scene.emit("action_share_screen", "");
         break;
       case "video_embed":
       case "image_embed":
@@ -551,7 +564,7 @@ function addGlobalEventListeners(scene, entryManager) {
         uploadAccept = "application/pdf";
         break;
       case "model_upload":
-        uploadAccept = ".glb";
+        uploadAccept = ".glb,.vox";
         break;
     }
 
@@ -562,11 +575,18 @@ function addGlobalEventListeners(scene, entryManager) {
     }
   });
 
-  document.addEventListener("pointerlockchange", () => {
-    const expanded = !document.pointerLockElement;
+  scene.addEventListener("cursor-lock-state-changed", () => {
+    const uiAnimationSystem = scene.systems["hubs-systems"].uiAnimationSystem;
 
-    if (!isInQuillEditor() && !(expanded && isInEditableField())) {
-      scene.systems["hubs-systems"].uiAnimationSystem[expanded ? "expandSidePanels" : "collapseSidePanels"]();
+    const cursorLockState = getCursorLockState();
+    const panelsCollapsed = uiAnimationSystem.isCollapsingOrCollapsed();
+
+    // Do not affect panels when in ephemeral locking states
+    const locked = cursorLockState === CURSOR_LOCK_STATES.LOCKED_PERSISTENT;
+    const unlocked = cursorLockState === CURSOR_LOCK_STATES.UNLOCKED_PERSISTENT;
+
+    if (!isInQuillEditor() && !isInEditableField() && ((panelsCollapsed && unlocked) || (!panelsCollapsed && locked))) {
+      uiAnimationSystem[panelsCollapsed ? "expandSidePanels" : "collapseSidePanels"]();
     }
   });
 
@@ -636,6 +656,14 @@ function addGlobalEventListeners(scene, entryManager) {
 
     scene.systems["hubs-systems"].autoQualitySystem.startTracking();
   });
+
+  scene.addEventListener("action_reset_objects", () => {
+    const hubId = hubChannel.hubId;
+    const metadata = hubMetadata.getMetadata(hubId);
+    if (!metadata || !metadata.template || !metadata.template.name) return;
+
+    resetTemplate(metadata.template.name);
+  });
 }
 
 // Attempts to pause a-frame scene and rendering if tabbed away or maximized and window is blurred
@@ -672,16 +700,25 @@ function setupNonVisibleHandler(scene) {
 
   if (!disablePausing) {
     window.addEventListener("blur", () => {
+      const disableBlurHandlerOnceIfVisible = window.APP.disableBlurHandlerOnceIfVisible;
+      window.APP.disableBlurHandlerOnceIfVisible = false;
+
+      if (disableBlurHandlerOnceIfVisible && document.visibilityState === "visible") {
+        // HACK needed to deal with browser stealing window focus occasionally eg screen share nag
+        clearTimeout(windowBlurredTimeout);
+        return;
+      }
+
       windowBlurredTimeout = setTimeout(() => {
         apply(true);
       }, 500);
     });
-
-    window.addEventListener("focus", () => {
-      clearTimeout(windowBlurredTimeout);
-      apply(false);
-    });
   }
+
+  window.addEventListener("focus", () => {
+    clearTimeout(windowBlurredTimeout);
+    apply(false);
+  });
 }
 
 function setupSidePanelLayout(scene) {
@@ -883,32 +920,6 @@ async function createSocket(entryManager) {
   return socket;
 }
 
-const addToPresenceLog = (() => {
-  const presenceLogEntries = [];
-
-  return entry => {
-    const scene = document.querySelector("a-scene");
-    entry.key = Date.now().toString();
-
-    presenceLogEntries.push(entry);
-    remountUI({ presenceLogEntries });
-    if (entry.type === "chat" && scene.is("loaded")) {
-      scene.systems["hubs-systems"].soundEffectsSystem.playSoundOneShot(SOUND_CHAT_MESSAGE);
-    }
-
-    // Fade out and then remove
-    setTimeout(() => {
-      entry.expired = true;
-      remountUI({ presenceLogEntries });
-
-      setTimeout(() => {
-        presenceLogEntries.splice(presenceLogEntries.indexOf(entry), 1);
-        remountUI({ presenceLogEntries });
-      }, 5000);
-    }, 20000);
-  };
-})();
-
 async function loadMemberships() {
   const accountId = store.credentialsAccountId;
   if (!accountId) return [];
@@ -948,16 +959,7 @@ async function start() {
   }
 
   const entryManager = new SceneEntryManager(spaceChannel, hubChannel, authChannel, history);
-  const messageDispatch = new MessageDispatch(
-    scene,
-    entryManager,
-    hubChannel,
-    addToPresenceLog,
-    remountUI,
-    mediaSearchStore
-  );
 
-  document.getElementById("avatar-rig").messageDispatch = messageDispatch;
   hideCanvas();
 
   setupPerformConditionalSignin(entryManager);
@@ -1082,7 +1084,6 @@ async function start() {
   authChannel.setSocket(socket);
 
   remountUI({
-    onSendMessage: messageDispatch.dispatch,
     onLoaded: () => store.executeOnLoadActions(scene),
     onMediaSearchResultEntrySelected: (entry, selectAction) =>
       scene.emit("action_selected_media_result_entry", { entry, selectAction }),
@@ -1112,15 +1113,7 @@ async function start() {
     joinHubPromise = null;
 
     if (spaceChannel.spaceId !== spaceId && nextSpaceToJoin === spaceId) {
-      joinSpacePromise = joinSpace(
-        socket,
-        history,
-        entryManager,
-        remountUI,
-        remountJelUI,
-        addToPresenceLog,
-        membershipsPromise
-      );
+      joinSpacePromise = joinSpace(socket, history, entryManager, remountUI, remountJelUI, membershipsPromise);
       await joinSpacePromise;
     }
 
@@ -1128,7 +1121,7 @@ async function start() {
     joinHubPromise = null;
 
     if (hubChannel.hubId !== hubId && nextHubToJoin === hubId) {
-      joinHubPromise = joinHub(socket, history, entryManager, remountUI, remountJelUI, addToPresenceLog);
+      joinHubPromise = joinHub(socket, history, entryManager, remountUI, remountJelUI);
       await joinHubPromise;
     }
   };

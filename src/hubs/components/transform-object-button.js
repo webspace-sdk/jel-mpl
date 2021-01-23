@@ -12,7 +12,7 @@ export const TRANSFORM_MODE = {
   SCALE: "scale"
 };
 
-const STEP_LENGTH = Math.PI / 10;
+const STEP_LENGTH = Math.PI / 100;
 const CAMERA_WORLD_QUATERNION = new THREE.Quaternion();
 const CAMERA_WORLD_POSITION = new THREE.Vector3();
 const TARGET_WORLD_QUATERNION = new THREE.Quaternion();
@@ -20,13 +20,7 @@ const v = new THREE.Vector3();
 const v2 = new THREE.Vector3();
 const q = new THREE.Quaternion();
 const q2 = new THREE.Quaternion();
-
-const eps = 0.001;
-//function qAlmostEquals(a, b) {
-//  return (
-//    Math.abs(a.x - b.x) < eps && Math.abs(a.y - b.y) < eps && Math.abs(a.z - b.z) < eps && Math.abs(a.w - b.w) < eps
-//  );
-//}
+const WHEEL_SENSITIVITY = 2.0;
 
 AFRAME.registerComponent("transform-button", {
   schema: {
@@ -129,6 +123,7 @@ AFRAME.registerSystem("transform-selected-object", {
       deltaOnPlane: new THREE.Vector3(),
       finalProjectedVec: new THREE.Vector3()
     };
+
     this.el.object3D.add(this.planarInfo.plane);
   },
 
@@ -138,6 +133,7 @@ AFRAME.registerSystem("transform-selected-object", {
     //const pInv = new THREE.Quaternion();
     return function stopTransform() {
       this.transforming = false;
+      this.target = null;
 
       // Flips object, taken out for now but maybe put on another hotkey
       /*if (this.mode === TRANSFORM_MODE.CURSOR) {
@@ -257,6 +253,7 @@ AFRAME.registerSystem("transform-selected-object", {
       finalProjectedVec
     } = this.planarInfo;
     this.target.getWorldPosition(plane.position);
+
     //    this.el.camera.getWorldQuaternion(plane.quaternion);
     this.el.camera.getWorldPosition(v);
     plane.matrixNeedsUpdate = true;
@@ -281,30 +278,59 @@ AFRAME.registerSystem("transform-selected-object", {
       .projectOnPlane(normal)
       .applyQuaternion(q.copy(plane.quaternion).inverse())
       .multiplyScalar(SENSITIVITY / cameraToPlaneDistance);
+
+    const userinput = AFRAME.scenes[0].systems.userinput;
+
+    let wheelDelta = 0.0;
+
+    if (userinput.get(paths.actions.transformScroll)) {
+      const dWheel = userinput.get(paths.actions.transformScroll);
+      wheelDelta += dWheel * WHEEL_SENSITIVITY;
+    }
+
     if (this.mode === TRANSFORM_MODE.CURSOR) {
-      const modify = AFRAME.scenes[0].systems.userinput.get(paths.actions.transformModifier);
+      const modify = userinput.get(paths.actions.transformModifier);
 
       this.dyAll = this.dyStore + finalProjectedVec.y;
-      this.dyApplied = modify ? this.dyAll : Math.round(this.dyAll / STEP_LENGTH) * STEP_LENGTH;
+      this.dyApplied = Math.round(this.dyAll / STEP_LENGTH) * STEP_LENGTH;
       this.dyStore = this.dyAll - this.dyApplied;
 
       this.dxAll = this.dxStore + finalProjectedVec.x;
-      this.dxApplied = modify ? this.dxAll : Math.round(this.dxAll / STEP_LENGTH) * STEP_LENGTH;
+      this.dxApplied = Math.round(this.dxAll / STEP_LENGTH) * STEP_LENGTH;
       this.dxStore = this.dxAll - this.dxApplied;
 
+      // Modify will roll the object in object space, non-modify will rotate it along camera x, y
       if (this.mode === TRANSFORM_MODE.CURSOR) {
-        this.target.getWorldQuaternion(TARGET_WORLD_QUATERNION);
-        v.set(1, 0, 0).applyQuaternion(modify ? CAMERA_WORLD_QUATERNION : TARGET_WORLD_QUATERNION);
-        q.setFromAxisAngle(v, modify ? -this.dyApplied : this.sign2 * this.sign * -this.dyApplied);
-
         if (modify) {
-          v.set(0, 1, 0).applyQuaternion(CAMERA_WORLD_QUATERNION);
-        } else {
-          v.set(0, 1, 0);
-        }
-        q2.setFromAxisAngle(v, this.dxApplied);
+          this.target.getWorldQuaternion(TARGET_WORLD_QUATERNION);
 
-        this.target.quaternion.premultiply(q).premultiply(q2);
+          v.set(0, 0, 1).applyQuaternion(TARGET_WORLD_QUATERNION);
+          q.setFromAxisAngle(
+            v,
+            Math.abs(this.dxApplied) > Math.abs(this.dyApplied)
+              ? -this.dxApplied + wheelDelta
+              : -this.dyApplied + wheelDelta
+          );
+
+          this.target.quaternion.premultiply(q);
+        } else {
+          if (wheelDelta !== 0.0) {
+            this.target.getWorldQuaternion(TARGET_WORLD_QUATERNION);
+
+            v.set(0, 0, 1).applyQuaternion(TARGET_WORLD_QUATERNION);
+            q.setFromAxisAngle(v, wheelDelta);
+
+            this.target.quaternion.premultiply(q);
+          }
+
+          v.set(1, 0, 0).applyQuaternion(CAMERA_WORLD_QUATERNION);
+          q.setFromAxisAngle(v, this.sign2 * this.sign * -this.dyApplied);
+
+          v.set(0, 1, 0);
+          q2.setFromAxisAngle(v, this.dxApplied);
+
+          this.target.quaternion.premultiply(q).premultiply(q2);
+        }
       }
 
       this.target.matrixNeedsUpdate = true;

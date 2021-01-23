@@ -1,6 +1,7 @@
 import { AmmoWorker, WorkerHelpers, CONSTANTS } from "three-ammo";
 import { AmmoDebugConstants, DefaultBufferSize } from "ammo-debug-drawer";
 import { RENDER_ORDER } from "../constants";
+import { WORLD_MATRIX_CONSUMERS } from "../utils/threejs-world-update";
 import configs from "../utils/configs";
 import * as ammoWasmUrl from "ammo.js/builds/ammo.wasm.wasm";
 
@@ -16,14 +17,17 @@ const WORLD_CONFIG = {
 const MAX_BODIES = 512;
 
 export class PhysicsSystem {
-  constructor(scene, atmosphereSystem, skyBeamSystem) {
+  constructor(scene, atmosphereSystem, skyBeamSystem, voxmojiSystem) {
     this.ammoWorker = new AmmoWorker();
     this.workerHelpers = new WorkerHelpers(this.ammoWorker);
     this.atmosphereSystem = atmosphereSystem;
     this.skyBeamSystem = skyBeamSystem;
+    this.voxmojiSystem = voxmojiSystem;
 
     this.bodyHelpers = [];
     this.shapeHelpers = [];
+    this.bodyReadyCallbacks = new Map();
+    this.bodyResetCallbacks = new Map();
     this.bodyUuids = [];
     this.indexToUuid = {};
     this.bodyUuidToData = new Map();
@@ -39,6 +43,7 @@ export class PhysicsSystem {
     this.ready = false;
     this.nextBodyUuid = 0;
     this.nextShapeUuid = 0;
+    this.tickHandlers = [];
 
     const arrayBuffer = new ArrayBuffer(4 * BUFFER_CONFIG.BODY_DATA_SIZE * MAX_BODIES);
     this.objectMatricesFloatArray = new Float32Array(arrayBuffer);
@@ -97,6 +102,10 @@ export class PhysicsSystem {
         }
       }
     };
+  }
+
+  duringNextTick(callback) {
+    this.tickHandlers.push(callback);
   }
 
   setDebug(debug) {
@@ -158,6 +167,12 @@ export class PhysicsSystem {
           }
         }
 
+        for (const handler of this.tickHandlers) {
+          handler();
+        }
+
+        this.tickHandlers.length = 0;
+
         /** Buffer Schema
          * Every physics body has 26 * 4 bytes (64bit float/int) assigned in the buffer
          * 0-15   Matrix4 elements (floats)
@@ -173,7 +188,10 @@ export class PhysicsSystem {
             const index = body.index;
             const type = body.options.type ? body.options.type : TYPE.DYNAMIC;
             const object3D = body.object3D;
-            if (type === TYPE.DYNAMIC) {
+            const physicsNeedsUpdate = object3D.consumeIfDirtyWorldMatrix(WORLD_MATRIX_CONSUMERS.PHYSICS);
+            const hadInitialSync = body.hadInitialSync;
+
+            if (type === TYPE.DYNAMIC && hadInitialSync) {
               matrix.fromArray(
                 this.objectMatricesFloatArray,
                 index * BUFFER_CONFIG.BODY_DATA_SIZE + BUFFER_CONFIG.MATRIX_OFFSET
@@ -190,22 +208,22 @@ export class PhysicsSystem {
               }
 
               object3D.matrixNeedsUpdate = true;
-              object3D.physicsNeedsUpdate = true;
-              this.atmosphereSystem.updateShadows();
-              this.skyBeamSystem.markMatrixDirty(object3D);
+
+              if (physicsNeedsUpdate) {
+                this.atmosphereSystem.updateShadows();
+              }
             }
 
             object3D.updateMatrices();
 
-            if (object3D.physicsNeedsUpdate && object3D.visible) {
-              object3D.physicsNeedsUpdate = false;
-
+            if (physicsNeedsUpdate && object3D.visible) {
               this.objectMatricesFloatArray.set(
                 object3D.matrixWorld.elements,
                 index * BUFFER_CONFIG.BODY_DATA_SIZE + BUFFER_CONFIG.MATRIX_OFFSET
               );
 
               this.needsTransfer = true;
+              if (!hadInitialSync) body.hadInitialSync = true;
             }
 
             body.linearVelocity = this.objectMatricesFloatArray[
@@ -218,11 +236,25 @@ export class PhysicsSystem {
 
             body.collisions.length = 0;
 
-            for (let j = BUFFER_CONFIG.COLLISIONS_OFFSET; j < BUFFER_CONFIG.BODY_DATA_SIZE; j++) {
-              const collidingIndex = this.objectMatricesIntArray[index * BUFFER_CONFIG.BODY_DATA_SIZE + j];
-              if (collidingIndex !== -1) {
-                body.collisions.push(this.indexToUuid[collidingIndex]);
+            if (type !== TYPE.DYNAMIC || hadInitialSync) {
+              for (let j = BUFFER_CONFIG.COLLISIONS_OFFSET; j < BUFFER_CONFIG.BODY_DATA_SIZE; j++) {
+                const collidingIndex = this.objectMatricesIntArray[index * BUFFER_CONFIG.BODY_DATA_SIZE + j];
+                if (collidingIndex !== -1) {
+                  body.collisions.push(this.indexToUuid[collidingIndex]);
+                }
               }
+            }
+
+            if (this.bodyReadyCallbacks.has(uuid)) {
+              const resolver = this.bodyReadyCallbacks.get(uuid);
+              this.bodyReadyCallbacks.delete(uuid);
+              resolver(uuid);
+            }
+
+            if (this.bodyResetCallbacks.has(uuid)) {
+              const resolver = this.bodyResetCallbacks.get(uuid);
+              this.bodyResetCallbacks.delete(uuid);
+              resolver(uuid);
             }
           }
 
@@ -269,72 +301,151 @@ export class PhysicsSystem {
     this.ownsBuffer = false;
   }
 
-  addBody(object3D, options) {
-    this.workerHelpers.addBody(this.nextBodyUuid, object3D, options);
+  addBody(object3D, options, callback = null) {
+    const uuid = this.nextBodyUuid;
+    this.nextBodyUuid++;
 
-    this.bodyUuidToData.set(this.nextBodyUuid, {
+    this.bodyUuidToData.set(uuid, {
       object3D: object3D,
       options: options,
       collisions: [],
       linearVelocity: 0,
       angularVelocity: 0,
       index: -1,
-      shapes: []
+      shapes: [],
+      hadInitialSync: false,
+      added: false
     });
 
-    return this.nextBodyUuid++;
+    this.duringNextTick(() => {
+      if (!this.bodyUuidToData.has(uuid)) return;
+      if (!object3D.parent) return;
+
+      object3D.updateMatrices();
+      object3D.parent.updateMatrices();
+
+      this.workerHelpers.addBody(uuid, object3D, options);
+      this.bodyUuidToData.get(uuid).added = true;
+
+      this.needsTransfer = true;
+
+      if (callback) {
+        this.bodyReadyCallbacks.set(uuid, callback);
+      }
+    });
+
+    return uuid;
+  }
+
+  getBody(uuid) {
+    return this.bodyUuidToData.get(uuid);
   }
 
   updateBody(uuid, options) {
-    if (this.bodyUuidToData.has(uuid)) {
-      this.bodyUuidToData.get(uuid).options = options;
-      this.workerHelpers.updateBody(uuid, options);
-    } else {
-      console.warn(`updateBody called for uuid: ${uuid} but body missing.`);
-    }
+    this.duringNextTick(() => {
+      if (this.bodyUuidToData.has(uuid)) {
+        this.bodyUuidToData.get(uuid).options = options;
+        this.workerHelpers.updateBody(uuid, options);
+        this.needsTransfer = true;
+      } else {
+        console.warn(`updateBody called for uuid: ${uuid} but body missing.`);
+      }
+    });
   }
 
   removeBody(uuid) {
-    const idx = this.bodyUuids.indexOf(uuid);
-    if (this.bodyUuidToData.has(uuid) && idx !== -1) {
-      delete this.indexToUuid[this.bodyUuidToData.get(uuid).index];
-      this.bodyUuidToData.delete(uuid);
-      this.bodyUuids.splice(idx, 1);
-      this.workerHelpers.removeBody(uuid);
-    } else {
-      console.warn(`removeBody called for uuid: ${uuid} but body missing.`);
-    }
+    this.duringNextTick(() => {
+      const idx = this.bodyUuids.indexOf(uuid);
+      if (idx !== -1) {
+        this.bodyUuids.splice(idx, 1);
+      }
+
+      if (this.bodyUuidToData.has(uuid)) {
+        const { added } = this.bodyUuidToData.get(uuid);
+        delete this.indexToUuid[this.bodyUuidToData.get(uuid).index];
+        this.bodyUuidToData.delete(uuid);
+        this.bodyReadyCallbacks.delete(uuid);
+
+        if (added) {
+          this.workerHelpers.removeBody(uuid);
+        }
+
+        this.needsTransfer = true;
+      } else {
+        console.warn(`removeBody called for uuid: ${uuid} but body missing.`);
+      }
+    });
   }
 
   addShapes(bodyUuid, mesh, options) {
-    if (mesh) {
-      const scale = new THREE.Vector3();
-      mesh.updateMatrices();
-      scale.setFromMatrixScale(mesh.matrixWorld);
-    }
-    this.workerHelpers.addShapes(bodyUuid, this.nextShapeUuid, mesh, options);
-    this.bodyUuidToData.get(bodyUuid).shapes.push(this.nextShapeUuid);
-    return this.nextShapeUuid++;
+    const uuid = this.nextShapeUuid;
+    this.nextShapeUuid++;
+
+    this.duringNextTick(() => {
+      if (mesh && !mesh.parent) return;
+
+      if (mesh) {
+        mesh.updateMatrices();
+        mesh.parent.updateMatrices();
+      }
+
+      this.workerHelpers.addShapes(bodyUuid, uuid, mesh, options);
+      this.bodyUuidToData.get(bodyUuid).shapes.push(uuid);
+      this.needsTransfer = true;
+    });
+
+    return uuid;
+  }
+
+  updateShapesScale(shapesUuid, mesh, options) {
+    this.duringNextTick(() => {
+      if (mesh) {
+        mesh.updateMatrices();
+      }
+
+      this.workerHelpers.updateShapesScale(shapesUuid, mesh.matrixWorld.elements, options);
+    });
   }
 
   removeShapes(bodyUuid, shapesUuid) {
-    if (this.bodyUuidToData.has(bodyUuid)) {
-      this.workerHelpers.removeShapes(bodyUuid, shapesUuid);
-      const idx = this.bodyUuidToData.get(bodyUuid).shapes.indexOf(shapesUuid);
-      if (idx !== -1) {
-        this.bodyUuidToData.get(bodyUuid).shapes.splice(idx, 1);
-      } else {
-        console.warn(`removeShapes called for shapesUuid: ${shapesUuid} on bodyUuid: ${bodyUuid} but shapes missing.`);
+    this.duringNextTick(() => {
+      if (this.bodyUuidToData.has(bodyUuid)) {
+        this.workerHelpers.removeShapes(bodyUuid, shapesUuid);
+        const idx = this.bodyUuidToData.get(bodyUuid).shapes.indexOf(shapesUuid);
+        if (idx !== -1) {
+          this.bodyUuidToData.get(bodyUuid).shapes.splice(idx, 1);
+        } else {
+          console.warn(
+            `removeShapes called for shapesUuid: ${shapesUuid} on bodyUuid: ${bodyUuid} but shapes missing.`
+          );
+        }
+        this.needsTransfer = true;
       }
-    }
+    });
   }
 
   addConstraint(constraintId, bodyUuid, targetUuid, options) {
-    this.workerHelpers.addConstraint(constraintId, bodyUuid, targetUuid, options);
+    this.duringNextTick(() => {
+      this.workerHelpers.addConstraint(constraintId, bodyUuid, targetUuid, options);
+      this.needsTransfer = true;
+    });
   }
 
   removeConstraint(constraintId) {
-    this.workerHelpers.removeConstraint(constraintId);
+    this.duringNextTick(() => {
+      this.workerHelpers.removeConstraint(constraintId);
+      this.needsTransfer = true;
+    });
+  }
+
+  applyImpulse(uuid, x, y, z, rx = 0, ry = 0, rz = 0) {
+    this.duringNextTick(() => {
+      if (this.bodyUuidToData.has(uuid)) {
+        this.workerHelpers.applyImpulse(uuid, x, y, z, rx, ry, rz);
+      } else {
+        console.warn(`applyImpulse called for uuid: ${uuid} but body missing.`);
+      }
+    });
   }
 
   registerBodyHelper(bodyHelper) {
@@ -369,11 +480,28 @@ export class PhysicsSystem {
     return this.bodyUuidToData.get(uuid).collisions;
   }
 
-  resetDynamicBody(uuid) {
-    this.workerHelpers.resetDynamicBody(uuid);
+  resetDynamicBody(uuid, callback) {
+    this.duringNextTick(() => {
+      if (this.bodyUuidToData.has(uuid)) {
+        const body = this.bodyUuidToData.get(uuid);
+        this.workerHelpers.resetDynamicBody(uuid);
+
+        if (callback) {
+          this.bodyReadyCallbacks.set(uuid, callback);
+        }
+
+        body.hadInitialSync = false;
+        this.needsTransfer = true;
+      } else {
+        console.warn(`resetDynamicBody called for uuid: ${uuid} but body missing.`);
+      }
+    });
   }
 
   activateBody(uuid) {
-    this.workerHelpers.activateBody(uuid);
+    this.duringNextTick(() => {
+      this.workerHelpers.activateBody(uuid);
+      this.needsTransfer = true;
+    });
   }
 }

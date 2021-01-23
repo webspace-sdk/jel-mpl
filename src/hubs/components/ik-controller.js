@@ -1,4 +1,5 @@
 import { waitForDOMContentLoaded } from "../utils/async-utils";
+import { almostEqual, almostEqualQuaternion } from "../utils/three-utils";
 import { isMine } from "../../jel/utils/ownership-utils";
 const { Vector3, Quaternion, Matrix4, Euler } = THREE;
 import BezierEasing from "bezier-easing";
@@ -287,10 +288,20 @@ AFRAME.registerComponent("ik-controller", {
       // hips will use vertex skinning to do the root displacement, which results in
       // frustum culling errors since three.js does not take into account skinning when
       // computing frustum culling sphere bounds.
-      avatar.position.x = headTransform.elements[12] + invHipsToHeadVector.x;
-      avatar.position.y = headTransform.elements[13] + invHipsToHeadVector.y;
-      avatar.position.z = headTransform.elements[14] + invHipsToHeadVector.z;
-      avatar.matrixNeedsUpdate = true;
+      const avatarX = headTransform.elements[12] + invHipsToHeadVector.x;
+      const avatarY = headTransform.elements[13] + invHipsToHeadVector.y;
+      const avatarZ = headTransform.elements[14] + invHipsToHeadVector.z;
+
+      if (
+        !almostEqual(avatarX, avatar.position.x) ||
+        !almostEqual(avatarY, avatar.position.y) ||
+        !almostEqual(avatarZ, avatar.position.z)
+      ) {
+        avatar.position.x = avatarX;
+        avatar.position.y = avatarY;
+        avatar.position.z = avatarZ;
+        avatar.matrixNeedsUpdate = true;
+      }
 
       if (hasHands) {
         const { invHipsQuaternion, cameraYRotation, cameraYQuaternion } = this;
@@ -333,11 +344,20 @@ AFRAME.registerComponent("ik-controller", {
         rootToChest.multiplyMatrices(avatar.matrix, chest.matrix);
         invRootToChest.getInverse(rootToChest);
 
+        // TODO optimize
+
         neck.matrixNeedsUpdate = true;
         chest.matrixNeedsUpdate = true;
+        root.matrixNeedsUpdate = true;
+        head.matrixNeedsUpdate = true;
       } else {
         this.hasConvergedHips = true;
-        head.quaternion.setFromRotationMatrix(headTransform);
+        this.headQuaternion.setFromRotationMatrix(headTransform);
+
+        if (!almostEqualQuaternion(this.headQuaternion, head.quaternion)) {
+          head.quaternion.copy(this.headQuaternion);
+          head.matrixNeedsUpdate = true;
+        }
       }
 
       let feedbackScale = 1.0;
@@ -348,29 +368,24 @@ AFRAME.registerComponent("ik-controller", {
 
       // Perform head velocity squish + rotate on other avatars
       if (!this.data.isSelf) {
+        let sx, sy, sz;
         if (relativeMotionSpring !== 0) {
           const scaleDXZ = 1.0 + relativeMotionSpring * 0.1 * this.relativeMotionMaxMagnitude;
           const scaleDY = 1.0 - relativeMotionSpring * 0.1 * this.relativeMotionMaxMagnitude;
-          head.scale.x = scaleDXZ * feedbackScale;
-          head.scale.y = scaleDY * feedbackScale;
-          head.scale.z = scaleDXZ * feedbackScale;
+          sx = scaleDXZ * feedbackScale;
+          sy = scaleDY * feedbackScale;
+          sz = scaleDXZ * feedbackScale;
         } else {
-          head.scale.x = feedbackScale;
-          head.scale.y = feedbackScale;
-          head.scale.z = feedbackScale;
+          sx = feedbackScale;
+          sy = feedbackScale;
+          sz = feedbackScale;
+        }
+
+        if (!almostEqual(head.scale.x, sx) || !almostEqual(head.scale.y, sy) || !almostEqual(head.scale.z, sz)) {
+          head.scale.set(sx, sy, sz);
+          head.matrixNeedsUpdate = true;
         }
       }
-
-      if (this.data.instanceHeads) {
-        this.avatarSystem.markMatrixDirty(this.el);
-
-        if (this.head) {
-          this.skyBeamSystem.markMatrixDirty(this.head);
-        }
-      }
-
-      root.matrixNeedsUpdate = true;
-      head.matrixNeedsUpdate = true;
     }
 
     const { leftHand, rightHand } = this;

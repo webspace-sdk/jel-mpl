@@ -96,7 +96,7 @@ function registerNetworkSchemas() {
     ]
   });
 
-  SAF.schemas.add({
+  const interactableMediaSchema = {
     template: "#interactable-media",
     components: [
       {
@@ -156,6 +156,40 @@ function registerNetworkSchemas() {
       {
         component: "media-loader",
         property: "mediaLayer"
+      },
+      {
+        component: "media-text",
+        property: "fitContent"
+      },
+      {
+        component: "media-text",
+        property: "foregroundColor",
+        requiresNetworkUpdate: vectorRequiresUpdate(0.01)
+      },
+      {
+        component: "media-text",
+        property: "backgroundColor",
+        requiresNetworkUpdate: vectorRequiresUpdate(0.01)
+      },
+      {
+        component: "media-text",
+        property: "transparent"
+      },
+      {
+        component: "media-text",
+        property: "font"
+      },
+      {
+        component: "media-emoji",
+        property: "emoji"
+      },
+      {
+        component: "media-video",
+        property: "loop"
+      },
+      {
+        component: "media-video",
+        property: "playOnHover"
       }
     ],
     nonAuthorizedComponents: [
@@ -172,7 +206,10 @@ function registerNetworkSchemas() {
         property: "index"
       }
     ]
-  });
+  };
+
+  NAF.schemas.add(interactableMediaSchema);
+  SAF.schemas.add(interactableMediaSchema);
 
   NAF.schemas.add({
     template: "#static-media",
@@ -262,40 +299,6 @@ function registerNetworkSchemas() {
         component: "camera-tool",
         property: "label"
       }
-    ]
-  });
-
-  NAF.schemas.add({
-    template: "#template-waypoint-avatar",
-    components: [
-      {
-        component: "position",
-        requiresNetworkUpdate: vectorRequiresUpdate(0.001)
-      },
-      {
-        component: "rotation",
-        requiresNetworkUpdate: vectorRequiresUpdate(0.5)
-      },
-      {
-        component: "scale",
-        requiresNetworkUpdate: vectorRequiresUpdate(0.001)
-      },
-      "waypoint"
-    ],
-    nonAuthorizedComponents: [
-      {
-        component: "position",
-        requiresNetworkUpdate: vectorRequiresUpdate(0.001)
-      },
-      {
-        component: "rotation",
-        requiresNetworkUpdate: vectorRequiresUpdate(0.5)
-      },
-      {
-        component: "scale",
-        requiresNetworkUpdate: vectorRequiresUpdate(0.001)
-      },
-      "waypoint"
     ]
   });
 

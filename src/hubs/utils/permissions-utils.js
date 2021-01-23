@@ -85,10 +85,10 @@ function authorizeEntityManipulation(entityMetadata, sender, senderPermissions) 
   const { template, creator } = entityMetadata;
   const isCreator = sender === creator;
 
-  if (template.endsWith("-waypoint-avatar")) {
-    return true;
-  } else if (template.endsWith("-avatar")) {
+  if (template.endsWith("-avatar")) {
     return isCreator;
+  } else if (template.endsWith("-media")) {
+    return isCreator || senderPermissions.spawn_and_move_media;
   } else if (template.endsWith("-camera")) {
     return isCreator || senderPermissions.spawn_camera;
   } else if (template.endsWith("-pen") || template.endsWith("-drawing")) {
@@ -106,7 +106,7 @@ function getPendingOrExistingEntityMetadata(networkId) {
   if (pendingData) {
     if (pendingData.owner) {
       // If owner is no longer present, give up.
-      const presenceState = window.APP.spaceChannel.presence.state[pendingData.owner];
+      const presenceState = window.APP.hubChannel.presence.state[pendingData.owner];
       if (!presenceState) return;
     }
 
@@ -165,7 +165,7 @@ export function authorizeOrSanitizeMessage(message) {
     return message;
   }
 
-  const presenceState = window.APP.spaceChannel.presence.state[from_session_id];
+  const presenceState = window.APP.hubChannel.presence.state[from_session_id];
 
   if (!presenceState) {
     // We've received a manipulation message from a user that we don't have presence state for yet.

@@ -1,8 +1,10 @@
 import qsTruthy from "./utils/qs_truthy";
 import nextTick from "./utils/next-tick";
 import { hackyMobileSafariTest } from "./utils/detect-touchscreen";
-import { takeOwnership } from "./../jel/utils/ownership-utils";
+import { ensureOwnership } from "./../jel/utils/ownership-utils";
+import { MEDIA_TEXT_COLOR_PRESETS } from "../jel/components/media-text";
 import { waitForDOMContentLoaded } from "./utils/async-utils";
+const { detect } = require("detect-browser");
 
 const isBotMode = qsTruthy("bot");
 const isMobile = AFRAME.utils.device.isMobile();
@@ -11,7 +13,7 @@ const isMobileVR = AFRAME.utils.device.isMobileVR();
 const isDebug = qsTruthy("debug");
 const qs = new URLSearchParams(location.search);
 
-import { addMedia } from "./utils/media-utils";
+import { spawnMediaInfrontOfPlayer, performAnimatedRemove } from "./utils/media-utils";
 import {
   isIn2DInterstitial,
   handleExitTo2DInterstitial,
@@ -174,7 +176,7 @@ export default class SceneEntryManager {
         if (NAF.utils.getCreator(entity) !== kickedClientId) continue;
 
         if (entity.components.networked.data.persistent) {
-          takeOwnership(entity);
+          ensureOwnership(entity);
           entity.parentNode.removeChild(entity);
         } else {
           NAF.entities.removeEntity(id);
@@ -196,39 +198,22 @@ export default class SceneEntryManager {
   };
 
   _setupMedia = () => {
-    const offset = { x: 0, y: 0, z: -1.5 };
-    const spawnMediaInfrontOfPlayer = (src, contents, contentOrigin) => {
-      if (!this.hubChannel.can("spawn_and_move_media")) return;
-      if (src instanceof File && !this.hubChannel.can("upload_files")) return;
-
-      const { entity, orientation } = addMedia(
-        src,
-        contents,
-        "#interactable-media",
-        contentOrigin,
-        null,
-        !!(src && !(src instanceof MediaStream)),
-        true
-      );
-      orientation.then(or => {
-        entity.setAttribute("offset-relative-to", {
-          target: "#avatar-pov-node",
-          offset,
-          orientation: or
-        });
-      });
-
-      return entity;
-    };
-
     this.scene.addEventListener("add_media", e => {
       const contentOrigin = e.detail instanceof File ? ObjectContentOrigins.FILE : ObjectContentOrigins.URL;
 
       spawnMediaInfrontOfPlayer(e.detail, null, contentOrigin);
     });
 
-    this.scene.addEventListener("add_media_contents", e => {
-      spawnMediaInfrontOfPlayer(null, e.detail, null);
+    this.scene.addEventListener("add_media_text", e => {
+      const [backgroundColor, foregroundColor] = MEDIA_TEXT_COLOR_PRESETS[
+        window.APP.store.state.uiState.mediaTextColorPresetIndex || 0
+      ];
+
+      spawnMediaInfrontOfPlayer(null, "", null, e.detail, { backgroundColor, foregroundColor });
+    });
+
+    this.scene.addEventListener("add_media_emoji", ({ detail: emoji }) => {
+      spawnMediaInfrontOfPlayer(null, emoji);
     });
 
     this.scene.addEventListener("object_spawned", e => {
@@ -263,47 +248,7 @@ export default class SceneEntryManager {
 
     this.scene.addEventListener("action_vr_notice_closed", () => forceExitFrom2DInterstitial());
 
-    document.addEventListener("paste", e => {
-      if (
-        (e.target.matches("input, textarea") || e.target.contentEditable === "true") &&
-        document.activeElement === e.target
-      )
-        return;
-
-      // Quill editor
-      if (document.activeElement && document.activeElement.classList.contains("ql-clipboard")) return;
-
-      // Never paste into scene if dialog is open
-      const uiRoot = document.querySelector(".ui-root");
-      if (uiRoot && uiRoot.classList.contains("in-modal-or-overlay")) return;
-
-      const html = e.clipboardData.getData("text/html");
-      const text = e.clipboardData.getData("text/plain");
-      // Check if data or http url
-      const url =
-        text &&
-        (text
-          .substring(0, 4)
-          .toLowerCase()
-          .startsWith("http") ||
-          text
-            .substring(0, 5)
-            .toLowerCase()
-            .startsWith("data:"))
-          ? text
-          : null;
-      const contents = (!url && (html || text)) || null;
-      const files = e.clipboardData.files && e.clipboardData.files;
-      if (url) {
-        spawnMediaInfrontOfPlayer(url, null, ObjectContentOrigins.URL);
-      } else if (contents) {
-        spawnMediaInfrontOfPlayer(null, contents, ObjectContentOrigins.CLIPBOARD);
-      } else {
-        for (const file of files) {
-          spawnMediaInfrontOfPlayer(file, null, ObjectContentOrigins.CLIPBOARD);
-        }
-      }
-    });
+    document.addEventListener("paste", e => AFRAME.scenes[0].systems["hubs-systems"].pasteSystem.enqueuePaste(e));
 
     document.addEventListener("dragover", e => e.preventDefault());
 
@@ -332,7 +277,6 @@ export default class SceneEntryManager {
       }
     });
 
-    let currentVideoShareEntity;
     let isHandlingVideoShare = false;
 
     const shareVideoMediaStream = async (constraints, isDisplayMedia) => {
@@ -349,28 +293,56 @@ export default class SceneEntryManager {
         }
       } catch (e) {
         isHandlingVideoShare = false;
-        this.scene.emit("share_video_failed");
         return;
+      }
+
+      const browser = detect();
+
+      if (browser.name === "chrome") {
+        // HACK Chrome will move focus to the screen share nag so disable
+        // the blur handler one time.
+        window.APP.disableBlurHandlerOnceIfVisible = true;
       }
 
       const videoTracks = newStream ? newStream.getVideoTracks() : [];
       const mediaStreamSystem = this.scene.systems["hubs-systems"].mediaStreamSystem;
 
       if (videoTracks.length > 0) {
-        newStream.getVideoTracks().forEach(track => mediaStreamSystem.addTrack(track));
+        // Clean up the media-stream entities (which are the entities that are
+        // bound to this client's webrtc video stream) when the video track ends.
+        const handleEndedVideoShareTrack = () => {
+          if (isHandlingVideoShare) return;
+          isHandlingVideoShare = true;
+
+          const mediaStreamEntities = document.querySelectorAll("[media-stream]");
+
+          for (const mediaStreamEntity of mediaStreamEntities) {
+            if (mediaStreamEntity && mediaStreamEntity.parentNode) {
+              ensureOwnership(mediaStreamEntity);
+              performAnimatedRemove(mediaStreamEntity);
+            }
+          }
+
+          const audioSystem = this.scene.systems["hubs-systems"].audioSystem;
+          audioSystem.removeStreamFromOutboundAudio("screenshare");
+
+          this.scene.removeState("sharing_video");
+          isHandlingVideoShare = false;
+        };
+
+        newStream.getVideoTracks().forEach(track => {
+          mediaStreamSystem.addTrack(track);
+          track.addEventListener("ended", handleEndedVideoShareTrack, { once: true });
+        });
 
         if (newStream && newStream.getAudioTracks().length > 0) {
           const audioSystem = this.scene.systems["hubs-systems"].audioSystem;
           audioSystem.addStreamToOutboundAudio("screenshare", newStream);
         }
 
-        currentVideoShareEntity = spawnMediaInfrontOfPlayer(mediaStreamSystem.mediaStream, null, undefined);
-
-        // Wire up custom removal event which will stop the stream.
-        currentVideoShareEntity.setAttribute("emit-scene-event-on-remove", "event:action_end_video_sharing");
+        spawnMediaInfrontOfPlayer(mediaStreamSystem.mediaStream);
       }
 
-      this.scene.emit("share_video_enabled", { source: isDisplayMedia ? "screen" : "camera" });
       this.scene.addState("sharing_video");
       isHandlingVideoShare = false;
     };
@@ -407,25 +379,8 @@ export default class SceneEntryManager {
     });
 
     this.scene.addEventListener("action_end_video_sharing", async () => {
-      if (isHandlingVideoShare) return;
-      isHandlingVideoShare = true;
-
-      if (currentVideoShareEntity && currentVideoShareEntity.parentNode) {
-        takeOwnership(currentVideoShareEntity);
-        currentVideoShareEntity.parentNode.removeChild(currentVideoShareEntity);
-      }
-
       const mediaStreamSystem = this.scene.systems["hubs-systems"].mediaStreamSystem;
       await mediaStreamSystem.stopVideoTracks();
-
-      const audioSystem = this.scene.systems["hubs-systems"].audioSystem;
-      audioSystem.removeStreamFromOutboundAudio("screenshare");
-
-      currentVideoShareEntity = null;
-
-      this.scene.emit("share_video_disabled");
-      this.scene.removeState("sharing_video");
-      isHandlingVideoShare = false;
     });
 
     this.scene.addEventListener("action_selected_media_result_entry", async e => {
