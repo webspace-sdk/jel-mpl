@@ -67,3 +67,4 @@ results/
 .ret.credentials
 src/jel/*
 src/assets/jel/*
+src/zoom.js
