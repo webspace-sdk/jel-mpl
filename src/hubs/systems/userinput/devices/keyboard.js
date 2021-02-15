@@ -101,8 +101,12 @@ export class KeyboardDevice {
           }
         }
 
-        // ` in text editor blurs it
-        if (e.type === "keydown" && e.code === "Backquote" && isInQuillEditor()) {
+        // ` in text editor blurs it, also non-modifier key @ for japanese keyboards since ` is missing
+        if (
+          e.type === "keydown" &&
+          (e.code === "Backquote" || (e.key === "@" && e.code === "BracketLeft")) &&
+          isInQuillEditor()
+        ) {
           window.APP.store.handleActivityFlag("mediaTextEditClose");
           // Without this, quill grabs focus when others types
           document.activeElement.parentElement.__quill.blur();
@@ -128,16 +132,16 @@ export class KeyboardDevice {
         if (
           (e.type === "keydown" && e.key === "/" && !isInEditableField()) || // Cancel slash in create select input since it hides it
           (e.ctrlKey &&
-            (e.key === "1" ||
-              e.key === "2" ||
-              e.key === "3" ||
-              e.key === "4" ||
-              e.key === "5" ||
-              e.key === "6" ||
-              e.key === "7" ||
-              e.key === "8" ||
-              e.key === "9" ||
-              e.key === "0")) ||
+            (e.code === "Digit1" ||
+              e.code === "Digit2" ||
+              e.code === "Digit3" ||
+              e.code === "Digit4" ||
+              e.code === "Digit5" ||
+              e.code === "Digit6" ||
+              e.code === "Digit7" ||
+              e.code === "Digit8" ||
+              e.code === "Digit9" ||
+              e.code === "Digit0")) ||
           (e.key === " " && isGameFocused) // Disable spacebar scrolling in main window
         ) {
           e.preventDefault();

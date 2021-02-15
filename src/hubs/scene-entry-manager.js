@@ -84,13 +84,6 @@ export default class SceneEntryManager {
 
     this._spawnAvatar();
 
-    if (isBotMode) {
-      this._runBot(); // TODO JEL bots
-      this.scene.addState("entered");
-      this.spaceChannel.sendEnteredHubEvent();
-      return;
-    }
-
     this.scene.classList.remove("hand-cursor");
     this.scene.classList.add("no-cursor");
 
@@ -98,20 +91,18 @@ export default class SceneEntryManager {
     this._entered = true;
 
     // Delay sending entry event telemetry until VR display is presenting.
-    (async () => {
-      while (enterInVR && !this.scene.renderer.vr.isPresenting()) {
-        await nextTick();
-      }
-
-      this.spaceChannel.sendEnteredHubEvent().then(() => {
-        this.store.update({ activity: { lastEnteredAt: new Date().toISOString() } });
-      });
-    })();
+    this.spaceChannel.sendEnteredHubEvent().then(() => {
+      this.store.update({ activity: { lastEnteredAt: new Date().toISOString() } });
+    });
 
     // Bump stored entry count after 30s
     setTimeout(() => this.store.bumpEntryCount(), 30000);
 
     this.scene.addState("entered");
+
+    if (isBotMode) {
+      //this._runBot(); // TODO JEL bots
+    }
   };
 
   whenSceneLoaded = callback => {
@@ -351,7 +342,7 @@ export default class SceneEntryManager {
       shareVideoMediaStream({
         video: {
           mediaSource: "camera",
-          width: isIOS ? { max: 1280 } : { max: 1280, ideal: 720 },
+          width: isIOS ? { max: 1280 } : { max: 2560 },
           frameRate: 30
         }
         //TODO: Capture audio from camera?
@@ -364,8 +355,8 @@ export default class SceneEntryManager {
           video: {
             // Work around BMO 1449832 by calculating the width. This will break for multi monitors if you share anything
             // other than your current monitor that has a different aspect ratio.
-            width: 720 * (screen.width / screen.height),
-            height: 720,
+            width: 1080 * (screen.width / screen.height),
+            height: 1080,
             frameRate: 30
           },
           audio: {

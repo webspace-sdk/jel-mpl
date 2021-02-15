@@ -89,20 +89,11 @@ export default class SpaceChannel extends EventTarget {
     hubMetadata.optimisticUpdate(hubId, newHubFields);
   };
 
-  beginStreaming() {
-    this.channel.push("events:begin_streaming", {});
-  }
-
-  endStreaming() {
-    this.channel.push("events:end_streaming", {});
-  }
-
-  beginRecording() {
-    this.channel.push("events:begin_recording", {});
-  }
-
-  endRecording() {
-    this.channel.push("events:end_recording", {});
+  updateUnmuted(unmuted) {
+    if (this.channel) {
+      console.log(unmuted);
+      this.channel.push("update_unmuted", { unmuted });
+    }
   }
 
   sendProfileUpdate = () => {
@@ -216,11 +207,21 @@ export default class SpaceChannel extends EventTarget {
     });
   }
 
-  createInvite() {
+  startBridge(bridge) {
+    if (!this.channel) return;
+    this.channel.push("start_bridge", { bridge });
+  }
+
+  exitBridge() {
+    if (!this.channel) return;
+    this.channel.push("exit_bridge", {});
+  }
+
+  createInvite(initialHubId = null) {
     if (!this.channel) return Promise.resolve(null);
 
     return new Promise(res => {
-      this.channel.push("create_invite", {}).receive("ok", ({ url }) => res(url));
+      this.channel.push("create_invite", { initial_hub_id: initialHubId }).receive("ok", ({ url }) => res(url));
     });
   }
 

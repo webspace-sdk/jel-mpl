@@ -3,7 +3,7 @@ import { getHubIdFromHistory, getSpaceIdFromHistory, setupPeerConnectionConfig }
 import nextTick from "./next-tick";
 import { authorizeOrSanitizeMessage } from "./permissions-utils";
 import { isSetEqual } from "../../jel/utils/set-utils";
-import { homeHubForSpaceId } from "../../jel/utils/membership-utils";
+import { homeHubForSpaceId, getInitialHubForSpaceId } from "../../jel/utils/membership-utils";
 import { clearResolveUrlCache } from "./media-utils";
 import { addNewHubToTree } from "../../jel/utils/tree-utils";
 import { getMessages } from "./i18n";
@@ -20,6 +20,7 @@ const PHOENIX_RELIABLE_NAF = "phx-reliable";
 const NOISY_OCCUPANT_COUNT = 12; // Above this # of occupants, we stop posting join/leaves/renames
 
 const isDebug = qsTruthy("debug");
+const isBotMode = qsTruthy("bot");
 const isMobile = AFRAME.utils.device.isMobile();
 const isMobileVR = AFRAME.utils.device.isMobileVR();
 
@@ -108,9 +109,15 @@ async function moveToInitialHubLocation(hub, hubStore) {
     );
   }
 
-  characterController.teleportTo(startPosition, startRotation);
+  if (isBotMode) {
+    // Bot spawns at semi-random position
+    startPosition.x = -31 + Math.random() * 63;
+    startPosition.z = -31 + Math.random() * 63;
+  } else {
+    startTrackingPosition(hubStore);
+  }
 
-  startTrackingPosition(hubStore);
+  characterController.teleportTo(startPosition, startRotation);
 }
 
 const createDynaChannelParams = () => {
@@ -128,6 +135,7 @@ const createDynaChannelParams = () => {
 
 const createSpaceChannelParams = () => {
   const store = window.APP.store;
+  const scene = AFRAME.scenes[0];
 
   const params = {
     profile: store.state.profile,
@@ -135,7 +143,8 @@ const createSpaceChannelParams = () => {
     perms_token: null,
     context: {
       mobile: isMobile || isMobileVR
-    }
+    },
+    unmuted: scene.is("unmuted")
   };
 
   if (isMobileVR) {
@@ -144,7 +153,6 @@ const createSpaceChannelParams = () => {
 
   const { token } = store.state.credentials;
   if (token) {
-    console.log(`Logged into account ${store.credentialsAccountId}`);
     params.auth_token = token;
   }
 
@@ -154,7 +162,8 @@ const createSpaceChannelParams = () => {
 const createHubChannelParams = () => {
   const params = {
     auth_token: null,
-    perms_token: null
+    perms_token: null,
+    is_first_shared: false
   };
 
   const { token } = window.APP.store.state.credentials;
@@ -206,7 +215,7 @@ function updateUIForHub(hub, hubChannel, remountUI, remountJelUI) {
   remountJelUI({ hub, selectedMediaLayer });
 }
 
-const initSpacePresence = (presence, socket, remountUI, remountJelUI) => {
+const initSpacePresence = (presence, socket) => {
   const { hubChannel, spaceChannel } = window.APP;
 
   const scene = document.querySelector("a-scene");
@@ -215,9 +224,9 @@ const initSpacePresence = (presence, socket, remountUI, remountJelUI) => {
   return new Promise(res => {
     presence.onSync(() => {
       const presence = spaceChannel.presence;
-      remountUI({ spacePresences: presence.state });
-      remountJelUI({ spacePresences: presence.state });
       presence.__hadInitialSync = true;
+
+      scene.emit("space-presence-synced");
       res();
     });
 
@@ -322,7 +331,7 @@ const joinSpaceChannel = async (spacePhxChannel, entryManager, treeManager, remo
         const sessionId = (socket.params().session_id = data.session_id);
 
         if (!presenceInitPromise) {
-          presenceInitPromise = initSpacePresence(presence, socket, remountUI, remountJelUI);
+          presenceInitPromise = initSpacePresence(presence, socket);
         }
 
         socket.params().session_token = data.session_token;
@@ -515,16 +524,13 @@ const joinSpaceChannel = async (spacePhxChannel, entryManager, treeManager, remo
   });
 };
 
-const initHubPresence = async (presence, remountUI, remountJelUI) => {
+const initHubPresence = async presence => {
   const scene = document.querySelector("a-scene");
   const { hubChannel } = window.APP;
 
   await new Promise(res => {
     presence.onSync(() => {
       const presence = hubChannel.presence;
-
-      remountUI({ hubPresences: presence.state });
-      remountJelUI({ hubPresences: presence.state });
 
       const sessionIds = Object.getOwnPropertyNames(presence.state);
       const occupantCount = sessionIds.length;
@@ -534,6 +540,8 @@ const initHubPresence = async (presence, remountUI, remountJelUI) => {
       } else {
         scene.removeState("copresent");
       }
+
+      scene.emit("hub-presence-synced");
 
       res();
     });
@@ -559,7 +567,7 @@ const joinHubChannel = async (hubPhxChannel, hubStore, entryManager, remountUI, 
         adapter.unreliableTransport = hubChannel.sendUnreliableNAF.bind(hubChannel);
 
         if (isInitialJoin) {
-          await initHubPresence(presence, remountUI, remountJelUI);
+          await initHubPresence(presence);
         } else {
           // Send complete sync on phoenix re-join.
           NAF.connection.entities.completeSync(null, true);
@@ -601,7 +609,7 @@ const joinHubChannel = async (hubPhxChannel, hubStore, entryManager, remountUI, 
             THREE.Cache.clear();
 
             // Clear voxmojis from prior world
-            scene.systems["hubs-systems"].voxmojiSystem.clear();
+            SYSTEMS.voxmojiSystem.clear();
 
             clearResolveUrlCache();
 
@@ -627,7 +635,7 @@ const joinHubChannel = async (hubPhxChannel, hubStore, entryManager, remountUI, 
         });
 
         isInitialJoin = false;
-        joinFinished();
+        joinFinished(true);
       })
       .receive("error", res => {
         if (res.reason === "closed") {
@@ -638,7 +646,7 @@ const joinHubChannel = async (hubPhxChannel, hubStore, entryManager, remountUI, 
           remountJelUI({ unavailableReason: "denied" });
         }
 
-        joinFinished();
+        joinFinished(false);
       });
   });
 };
@@ -652,11 +660,9 @@ const setupSpaceChannelMessageHandlers = spacePhxChannel => {
   });
 
   spacePhxChannel.on("persona_refresh", ({ session_id }) => {
-    const scene = document.querySelector("a-scene");
-
     // If persona changed, update avatar color + sky beam color
-    scene.systems["hubs-systems"].avatarSystem.markPersonaAvatarDirty(session_id);
-    scene.systems["hubs-systems"].skyBeamSystem.markColorDirtyForCreator(session_id);
+    SYSTEMS.avatarSystem.markPersonaAvatarDirty(session_id);
+    SYSTEMS.skyBeamSystem.markColorDirtyForCreator(session_id);
   });
 };
 
@@ -780,14 +786,22 @@ const setupHubChannelMessageHandlers = (hubPhxChannel, hubStore, entryManager, h
   });
 };
 
-export function joinSpace(socket, history, entryManager, remountUI, remountJelUI, membershipsPromise) {
+// Dirty flag used to pass is_first_shared=true to hub join, which is used to trigger
+// notifications.
+let hasJoinedPublicHubForCurrentSpace;
+
+export function joinSpace(socket, history, subscriptions, entryManager, remountUI, remountJelUI, membershipsPromise) {
   const spaceId = getSpaceIdFromHistory(history);
   const { dynaChannel, spaceChannel, spaceMetadata, hubMetadata, store } = window.APP;
   console.log(`Space ID: ${spaceId}`);
   remountJelUI({ spaceId });
 
   const dynaPhxChannel = socket.channel(`dyna`, createDynaChannelParams());
-  dynaPhxChannel.join().receive("error", res => console.error(res));
+  dynaPhxChannel
+    .join()
+    .receive("ok", async data => subscriptions.setVapidPublicKey(data.vapid_public_key))
+    .receive("error", res => console.error(res));
+
   dynaPhxChannel.on("notice", async data => {
     // On dyna deploys, reconnect after a random delay until pool + version match deployed version/pool
     if (data.event === "dyna-deploy") {
@@ -801,6 +815,8 @@ export function joinSpace(socket, history, entryManager, remountUI, remountJelUI
   const spacePhxChannel = socket.channel(`space:${spaceId}`, createSpaceChannelParams());
   setupSpaceChannelMessageHandlers(spacePhxChannel, entryManager);
   spaceChannel.bind(spacePhxChannel, spaceId);
+
+  hasJoinedPublicHubForCurrentSpace = false;
 
   const treeManager = new TreeManager(spaceMetadata, hubMetadata);
 
@@ -867,19 +883,39 @@ export async function joinHub(socket, history, entryManager, remountUI, remountJ
   console.log(`Hub ID: ${hubId}`);
 
   const hubStore = new HubStore(hubId);
-  const hubPhxChannel = socket.channel(`hub:${hubId}`, createHubChannelParams());
+  const params = createHubChannelParams();
+
+  await hubMetadata.ensureMetadataForIds([hubId], true);
+
+  const metadata = hubMetadata.getMetadata(hubId);
+  const isHomeHub = metadata && metadata.is_home;
+
+  if (!isHomeHub && !hasJoinedPublicHubForCurrentSpace) {
+    params.is_first_shared = !hasJoinedPublicHubForCurrentSpace;
+    hasJoinedPublicHubForCurrentSpace = true;
+  }
+
+  const hubPhxChannel = socket.channel(`hub:${hubId}`, params);
 
   stopTrackingPosition();
   setupHubChannelMessageHandlers(hubPhxChannel, hubStore, entryManager, history, remountUI, remountJelUI);
 
-  await hubMetadata.ensureMetadataForIds([hubId], true);
   hubChannel.bind(hubPhxChannel, hubId);
 
   if (NAF.connection.adapter) {
     NAF.connection.adapter.leaveHub();
   }
 
-  await joinHubChannel(hubPhxChannel, hubStore, entryManager, remountUI, remountJelUI);
+  const joinSuccessful = await joinHubChannel(hubPhxChannel, hubStore, entryManager, remountUI, remountJelUI);
 
-  store.setLastJoinedHubId(spaceId, hubId);
+  if (joinSuccessful) {
+    store.setLastJoinedHubId(spaceId, hubId);
+  } else {
+    const initialHubForSpaceId = getInitialHubForSpaceId(spaceId);
+
+    // Failed to join initial hub, remove this entry so we don't end up trying to go here again.
+    if (hubId === initialHubForSpaceId) {
+      store.clearLastJoinedHubId(spaceId);
+    }
+  }
 }

@@ -5,6 +5,7 @@ import { childMatch, rotateInPlaceAroundWorldUp, affixToWorldUp, IDENTITY_QUATER
 import { getCurrentPlayerHeight } from "../utils/get-current-player-height";
 //import { m4String } from "../utils/pretty-print";
 import { WORLD_MAX_COORD, WORLD_MIN_COORD, WORLD_SIZE } from "../../jel/systems/terrain-system";
+import qsTruthy from "../utils/qs_truthy";
 
 const calculateDisplacementToDesiredPOV = (function() {
   const translationCoordinateSpace = new THREE.Matrix4();
@@ -36,6 +37,8 @@ const BASE_SPEED = 3.2; //TODO: in what units?
 const JUMP_GRAVITY = -16.0;
 const INITIAL_JUMP_VELOCITY = 5.0;
 
+const isBotMode = qsTruthy("bot_move");
+
 export class CharacterControllerSystem {
   constructor(scene, terrainSystem) {
     this.scene = scene;
@@ -44,6 +47,7 @@ export class CharacterControllerSystem {
     this.shouldLandWhenPossible = false;
     this.lastSeenNavVersion = -1;
     this.relativeMotion = new THREE.Vector3(0, 0, 0);
+    this.relativeMotionValue = 0;
     this.nextRelativeMotion = new THREE.Vector3(0, 0, 0);
     this.dXZ = 0;
     this.movedThisFrame = false;
@@ -108,6 +112,34 @@ export class CharacterControllerSystem {
     };
   })();
 
+  teleportToEntity = (function() {
+    const worldAvatarPos = new THREE.Vector3();
+    const worldElPos = new THREE.Vector3();
+    const delta = new THREE.Vector3();
+    const tmpQuat = new THREE.Quaternion();
+    const lookAtMatrix = new THREE.Matrix4();
+    return function teleportTo(el, distance = 0.0) {
+      const obj = el.object3D;
+      obj.getWorldPosition(worldElPos);
+      this.avatarPOV.object3D.getWorldPosition(worldAvatarPos);
+      lookAtMatrix.lookAt(worldAvatarPos, worldElPos, obj.up);
+      tmpQuat.setFromRotationMatrix(lookAtMatrix);
+      delta.subVectors(worldElPos, worldAvatarPos);
+      delta.setLength(delta.length() - distance);
+      worldAvatarPos.add(delta);
+
+      this.teleportTo(worldAvatarPos, tmpQuat);
+    };
+  })();
+
+  teleportToUser(sessionId) {
+    const avatarEl = SYSTEMS.avatarSystem.getAvatarElForSessionId(sessionId);
+
+    if (avatarEl) {
+      this.teleportToEntity(avatarEl, 5.0);
+    }
+  }
+
   tick = (function() {
     const snapRotatedPOV = new THREE.Matrix4();
     const newPOV = new THREE.Matrix4();
@@ -143,8 +175,18 @@ export class CharacterControllerSystem {
         this.shouldLandWhenPossible = false;
       }
       const preferences = window.APP.store.state.preferences;
-      const snapRotateLeft = userinput.get(paths.actions.snapRotateLeft);
-      const snapRotateRight = userinput.get(paths.actions.snapRotateRight);
+      let snapRotateLeft = userinput.get(paths.actions.snapRotateLeft);
+      let snapRotateRight = userinput.get(paths.actions.snapRotateRight);
+
+      if (isBotMode) {
+        // Bot mode randomly rotates
+        if (Math.random() < 0.01) {
+          snapRotateLeft = true;
+        } else if (Math.random() < 0.01) {
+          snapRotateRight = true;
+        }
+      }
+
       if (snapRotateLeft) {
         this.dXZ +=
           preferences.snapRotationDegrees === undefined
@@ -161,6 +203,11 @@ export class CharacterControllerSystem {
         this.scene.systems["hubs-systems"].soundEffectsSystem.playSoundOneShot(SOUND_SNAP_ROTATE);
       }
       const characterAcceleration = userinput.get(paths.actions.characterAcceleration);
+
+      if (isBotMode) {
+        // Bot mode keeps moving around
+        characterAcceleration[1] += 0.75;
+      }
 
       const boost = userinput.get(paths.actions.boost) ? 2 : 1;
 
@@ -182,14 +229,15 @@ export class CharacterControllerSystem {
                 : zCharacterAcceleration)
         );
 
-        if (this.networkedAvatar) {
-          this.networkedAvatar.data.relative_motion =
-            Math.max(Math.abs(characterAcceleration[0]), Math.abs(characterAcceleration[1])) * boost;
-        }
+        this.relativeMotionValue =
+          Math.max(Math.abs(characterAcceleration[0]), Math.abs(characterAcceleration[1])) * boost;
       } else {
-        if (this.networkedAvatar) {
-          this.networkedAvatar.data.relative_motion = 0;
-        }
+        this.relativeMotionValue = 0;
+      }
+
+      if (this.networkedAvatar) {
+        this.networkedAvatar.data.relative_motion = this.relativeMotionValue;
+        this.networkedAvatar.data.is_jumping = this.jumpYVelocity !== null && this.jumpYVelocity > 2.5;
       }
 
       const lerpC = vrMode ? 0 : 0.85; // TODO: To support drifting ("ice skating"), motion needs to keep initial direction

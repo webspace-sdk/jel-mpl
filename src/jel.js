@@ -29,7 +29,7 @@ import "./hubs/utils/threejs-world-update";
 import patchThreeAllocations from "./hubs/utils/threejs-allocation-patches";
 import patchThreeNoProgramDispose from "./jel/utils/threejs-avoid-disposing-programs";
 import { detectOS, detect } from "detect-browser";
-import { getReticulumMeta, fetchReticulumAuthenticated } from "./hubs/utils/phoenix-utils";
+import { getReticulumMeta } from "./hubs/utils/phoenix-utils";
 
 import "./hubs/naf-dialog-adapter";
 
@@ -69,6 +69,7 @@ import "./jel/components/media-text";
 import "./jel/components/media-emoji";
 import "./jel/components/media-stream";
 import { initQuillPool } from "./jel/utils/quill-pool";
+import nextTick from "./hubs/utils/next-tick";
 import "./hubs/components/avatar-volume-controls";
 import "./hubs/components/pinch-to-move";
 import "./hubs/components/position-at-border";
@@ -107,6 +108,10 @@ import "./hubs/components/periodic-full-syncs";
 import "./hubs/components/inspect-button";
 import "./hubs/components/set-max-resolution";
 import "./hubs/components/avatar-audio-source";
+import "./jel/components/pinned-to-self";
+import "./jel/components/look-at-self";
+import Subscriptions from "./hubs/subscriptions";
+
 import { SOUND_QUACK, SOUND_SPECIAL_QUACK } from "./hubs/systems/sound-effects-system";
 import ducky from "./assets/hubs/models/DuckyMesh.glb";
 import { getAbsoluteHref } from "./hubs/utils/media-url-utils";
@@ -117,6 +122,7 @@ import { Router, Route } from "react-router-dom";
 import { createBrowserHistory } from "history";
 import { clearHistoryState } from "./hubs/utils/history";
 import JelUI from "./jel/react-components/jel-ui";
+import AccountChannel from "./jel/utils/account-channel";
 import AuthChannel from "./hubs/utils/auth-channel";
 import DynaChannel from "./jel/utils/dyna-channel";
 import SpaceChannel from "./hubs/utils/space-channel";
@@ -163,9 +169,13 @@ import { platformUnsupported } from "./hubs/support";
 
 window.APP = new App();
 const store = window.APP.store;
+const subscriptions = new Subscriptions();
+window.APP.subscriptions = subscriptions;
+
 store.update({ preferences: { shouldPromptForRefresh: undefined } });
 
 const history = createBrowserHistory();
+const accountChannel = new AccountChannel(store);
 const authChannel = new AuthChannel(store);
 const dynaChannel = new DynaChannel(store);
 const spaceChannel = new SpaceChannel(store);
@@ -175,6 +185,7 @@ const spaceMetadata = new AtomMetadata(ATOM_TYPES.SPACE);
 const hubMetadata = new AtomMetadata(ATOM_TYPES.HUB);
 
 window.APP.history = history;
+window.APP.accountChannel = accountChannel;
 window.APP.dynaChannel = dynaChannel;
 window.APP.spaceChannel = spaceChannel;
 window.APP.hubChannel = hubChannel;
@@ -199,14 +210,6 @@ window.APP.materialQuality =
       : isMobile || isMobileVR
         ? "low"
         : "high";
-
-// Detail levels
-// 0 - Full
-// 1 - Reduce shadow map, no reflections, simple sky, no SSAO, no terrain detail meshes
-// 2 - Also disable shadows and FXAA
-//
-// Start at lowest detail level, so app boots quickly.
-window.APP.detailLevel = 2;
 
 import "./hubs/components/owned-object-limiter";
 import "./hubs/components/owned-object-cleanup-timeout";
@@ -244,7 +247,16 @@ NAF.options.syncSource = PHOENIX_RELIABLE_NAF;
 const isBotMode = qsTruthy("bot");
 const isTelemetryDisabled = qsTruthy("disable_telemetry");
 const isDebug = qsTruthy("debug");
-const disablePausing = qsTruthy("no_pause");
+const disablePausing = qsTruthy("no_pause") || isBotMode;
+
+if (isBotMode) {
+  const token = qs.get("credentials_token");
+  const email = qs.get("credentials_email") || "nobody@nowhere.com";
+
+  if (token) {
+    store.update({ credentials: { token, email } });
+  }
+}
 
 if (!isBotMode && !isTelemetryDisabled) {
   registerTelemetry("/hub", "Room Landing Page");
@@ -269,6 +281,8 @@ if (!isBotMode && !isTelemetryDisabled) {
       mixpanel.identify(`${hash}`);
     }
   }
+} else {
+  mixpanel.track = function() {};
 }
 
 registerWrappedEntityPositionNormalizers();
@@ -347,6 +361,8 @@ function remountUI(props) {
 }
 
 function mountJelUI(props = {}) {
+  if (isBotMode) return;
+
   const scene = document.querySelector("a-scene");
 
   ReactDOM.render(
@@ -357,6 +373,7 @@ function mountJelUI(props = {}) {
             {...{
               scene,
               store,
+              subscriptions,
               history: routeProps.history,
               ...props
             }}
@@ -416,20 +433,22 @@ function setupPerformConditionalSignin(entryManager) {
   remountUI({ performConditionalSignIn });
 }
 
-// TODO JEL
-//async function runBotMode(scene, entryManager) {
-//  const noop = () => {};
-//  scene.renderer = { setAnimationLoop: noop, render: noop };
-//
-//  while (!NAF.connection.isConnected()) await nextTick();
-//  entryManager.enterSceneWhenLoaded(false);
-//}
+async function runBotMode(scene, entryManager) {
+  const noop = () => {};
+  scene.renderer = { setAnimationLoop: noop, render: noop };
+
+  while (!NAF.connection.isConnected()) await nextTick();
+  while (!SAF.connection.isConnected()) await nextTick();
+  entryManager.enterSceneWhenLoaded(false);
+}
 
 function initPhysicsThreeAndCursor(scene) {
   const physicsSystem = scene.systems["hubs-systems"].physicsSystem;
   physicsSystem.setDebug(isDebug || physicsSystem.debug);
-  patchThreeAllocations();
-  patchThreeNoProgramDispose();
+  const renderer = AFRAME.scenes[0].renderer;
+
+  patchThreeAllocations(renderer);
+  patchThreeNoProgramDispose(renderer);
 }
 
 async function initAvatar() {
@@ -647,7 +666,7 @@ function addGlobalEventListeners(scene, entryManager) {
   let performedInitialQualityBoost = false;
 
   scene.addEventListener("terrain_chunk_loading_complete", () => {
-    if (!performedInitialQualityBoost) {
+    if (!performedInitialQualityBoost && !isBotMode) {
       performedInitialQualityBoost = true;
       window.APP.detailLevel = 0;
       scene.renderer.setPixelRatio(window.devicePixelRatio);
@@ -671,35 +690,50 @@ function setupNonVisibleHandler(scene) {
   const physics = scene.systems["hubs-systems"].physicsSystem;
   const autoQuality = scene.systems["hubs-systems"].autoQualitySystem;
 
+  const webglLoseContextExtension = scene.renderer.getContext().getExtension("WEBGL_lose_context");
+
   const apply = hidden => {
     if (document.visibilityState === "hidden" || hidden) {
       if (document.visibilityState === "visible") {
         scene.pause();
         scene.renderer.animation.stop();
+        SYSTEMS.externalCameraSystem.stopRendering();
       }
 
       document.body.classList.add("paused");
       autoQuality.stopTracking();
       physics.updateSimulationRate(1000.0 / 15.0);
+      accountChannel.setInactive();
     } else {
       if (document.visibilityState === "visible") {
+        // Hacky. On some platforms GL context needs to be explicitly restored. So do it.
+        // This really shouldn't be necessary :P
+        if (scene.renderer.getContext().isContextLost() && webglLoseContextExtension) {
+          webglLoseContextExtension.restoreContext();
+        }
+
         scene.play();
         scene.renderer.animation.start();
+        SYSTEMS.externalCameraSystem.startRendering();
         autoQuality.startTracking();
       }
 
       document.body.classList.remove("paused");
       physics.updateSimulationRate(1000.0 / 90.0);
+      accountChannel.setActive();
     }
   };
 
   // Need a timeout since tabbing in browser causes blur then focus rapidly
   let windowBlurredTimeout = null;
 
-  document.addEventListener("visibilitychange", () => apply());
-
   if (!disablePausing) {
+    document.addEventListener("visibilitychange", () => apply());
+
     window.addEventListener("blur", () => {
+      // When setting up bridge, bridge iframe can steal focus
+      if (SYSTEMS.videoBridgeSystem.isSettingUpBridge) return;
+
       const disableBlurHandlerOnceIfVisible = window.APP.disableBlurHandlerOnceIfVisible;
       window.APP.disableBlurHandlerOnceIfVisible = false;
 
@@ -713,12 +747,12 @@ function setupNonVisibleHandler(scene) {
         apply(true);
       }, 500);
     });
-  }
 
-  window.addEventListener("focus", () => {
-    clearTimeout(windowBlurredTimeout);
-    apply(false);
-  });
+    window.addEventListener("focus", () => {
+      clearTimeout(windowBlurredTimeout);
+      apply(false);
+    });
+  }
 }
 
 function setupSidePanelLayout(scene) {
@@ -883,21 +917,18 @@ async function setupUIBasedUponVRTypes(availableVREntryTypesPromise) {
   }
 }
 
-// function startBotModeIfNecessary(scene, entryManager) {
-//   // TODO JEL bots
-//   const environmentScene = document.querySelector("#environment-scene");
-//
-//   const onFirstEnvironmentLoad = () => {
-//     // Replace renderer with a noop renderer to reduce bot resource usage.
-//     if (isBotMode) {
-//       runBotMode(scene, entryManager);
-//     }
-//
-//     environmentScene.removeEventListener("model-loaded", onFirstEnvironmentLoad);
-//   };
-//
-//   environmentScene.addEventListener("model-loaded", onFirstEnvironmentLoad);
-// }
+function startBotModeIfNecessary(scene, entryManager) {
+  if (isBotMode) {
+    const onTerrainLoaded = () => {
+      // Replace renderer with a noop renderer to reduce bot resource usage.
+      runBotMode(scene, entryManager);
+
+      scene.addEventListener("terrain_chunk_loading_complete", onTerrainLoaded);
+    };
+
+    scene.addEventListener("terrain_chunk_loading_complete", onTerrainLoaded);
+  }
+}
 
 async function createSocket(entryManager) {
   let isReloading = false;
@@ -920,17 +951,6 @@ async function createSocket(entryManager) {
   return socket;
 }
 
-async function loadMemberships() {
-  const accountId = store.credentialsAccountId;
-  if (!accountId) return [];
-
-  const res = await fetchReticulumAuthenticated(`/api/v1/accounts/${accountId}`);
-  if (res.memberships.length === 0) return [];
-
-  remountJelUI({ memberships: res.memberships });
-  return res.memberships;
-}
-
 async function start() {
   if (!(await checkPrerequisites())) return;
   mixpanel.track("Startup Start", {});
@@ -946,16 +966,16 @@ async function start() {
       navigator.serviceWorker
         .register("/jel.service.js")
         .then(() => {
-          //navigator.serviceWorker.ready;
-          //  .then(registration => subscriptions.setRegistration(registration))
-          //  .catch(() => subscriptions.setRegistrationFailed());
+          navigator.serviceWorker.ready
+            .then(registration => subscriptions.setRegistration(registration))
+            .catch(e => console.error(e));
         })
-        .catch(() => /*subscriptions.setRegistrationFailed()*/ {});
+        .catch(e => console.error(e));
     } catch (e) {
-      //subscriptions.setRegistrationFailed();
+      subscriptions.setRegistrationFailed();
     }
   } else {
-    //subscriptions.setRegistrationFailed();
+    subscriptions.setRegistrationFailed();
   }
 
   const entryManager = new SceneEntryManager(spaceChannel, hubChannel, authChannel, history);
@@ -1034,7 +1054,7 @@ async function start() {
 
   setupVREventHandlers(scene, availableVREntryTypesPromise);
   setupUIBasedUponVRTypes(availableVREntryTypesPromise); // Note no await here, to avoid blocking
-  // startBotModeIfNecessary(scene, entryManager); TODO JEL
+  startBotModeIfNecessary(scene, entryManager);
   clearHistoryState(history);
 
   const socket = await createSocket(entryManager);
@@ -1096,7 +1116,32 @@ async function start() {
   let joinSpacePromise;
   let joinHubPromise;
 
-  const membershipsPromise = loadMemberships();
+  const { token } = store.state.credentials;
+  let membershipsPromise;
+
+  if (token) {
+    console.log(`Logged into account ${store.credentialsAccountId}`);
+
+    const accountPhxChannel = socket.channel(`account:${store.credentialsAccountId}`, { auth_token: token });
+    membershipsPromise = new Promise((res, rej) => {
+      accountPhxChannel
+        .join()
+        .receive("ok", async accountInfo => {
+          const { subscriptions: existingSubscriptions } = accountInfo;
+          accountChannel.syncAccountInfo(accountInfo);
+          remountJelUI({ memberships: accountChannel.memberships, hubSettings: accountChannel.hubSettings });
+          subscriptions.handleExistingSubscriptions(existingSubscriptions);
+          res(accountChannel.memberships);
+        })
+        .receive("error", res => {
+          console.error(res);
+          rej();
+        });
+    });
+    accountChannel.bind(accountPhxChannel);
+  } else {
+    membershipsPromise = Promise.resolve([]);
+  }
 
   const performJoin = async () => {
     // Handle rapid history changes, only join last one.
@@ -1113,7 +1158,15 @@ async function start() {
     joinHubPromise = null;
 
     if (spaceChannel.spaceId !== spaceId && nextSpaceToJoin === spaceId) {
-      joinSpacePromise = joinSpace(socket, history, entryManager, remountUI, remountJelUI, membershipsPromise);
+      joinSpacePromise = joinSpace(
+        socket,
+        history,
+        subscriptions,
+        entryManager,
+        remountUI,
+        remountJelUI,
+        membershipsPromise
+      );
       await joinSpacePromise;
     }
 

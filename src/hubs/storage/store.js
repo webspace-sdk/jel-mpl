@@ -169,7 +169,8 @@ export const SCHEMA = {
       properties: {
         navPanelWidth: { type: "number" },
         presencePanelWidth: { type: "number" },
-        mediaTextColorPresetIndex: { type: "number" }
+        mediaTextColorPresetIndex: { type: "number" },
+        closedNotificationBanner: { type: "boolean" }
       }
     },
 
@@ -339,6 +340,15 @@ export default class Store extends EventTarget {
     const lastJoinedHubIds = this.state.context.lastJoinedHubIds || {};
     lastJoinedHubIds[spaceId] = hubId;
     this.update({ context: { lastJoinedHubIds } });
+  }
+
+  clearLastJoinedHubId(spaceId) {
+    const lastJoinedHubIds = this.state.context.lastJoinedHubIds || {};
+
+    if (lastJoinedHubIds[spaceId]) {
+      delete lastJoinedHubIds[spaceId];
+      this.update({ context: { lastJoinedHubIds } });
+    }
   }
 
   clearOnLoadActions() {

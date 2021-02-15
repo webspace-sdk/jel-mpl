@@ -1,10 +1,12 @@
 import { waitForDOMContentLoaded } from "../utils/async-utils";
-import { almostEqual, almostEqualQuaternion } from "../utils/three-utils";
+import { almostEqual, almostEqualVec3, almostEqualQuaternion } from "../utils/three-utils";
+import { findAncestorWithComponent } from "../utils/scene-graph";
 import { isMine } from "../../jel/utils/ownership-utils";
 const { Vector3, Quaternion, Matrix4, Euler } = THREE;
 import BezierEasing from "bezier-easing";
 
-const springStep = BezierEasing(0.47, -0.07, 0.44, 1.65);
+const squeezeSpringStep = BezierEasing(0.47, -0.07, 0.44, 1.65);
+const jumpSpringStep = BezierEasing(0.47, 0.0, 0.44, 2.35);
 
 function quaternionAlmostEquals(epsilon, u, v) {
   // Note: q and -q represent same rotation
@@ -19,6 +21,22 @@ function quaternionAlmostEquals(epsilon, u, v) {
       Math.abs(-u.w - v.w) < epsilon)
   );
 }
+
+const getAudioFeedbackScale = (() => {
+  const tempScaleFromPosition = new THREE.Vector3();
+  const tempScaleToPosition = new THREE.Vector3();
+
+  return function(fromObject, toObject, minDistance, minScale, maxScale, volume) {
+    tempScaleToPosition.setFromMatrixPosition(toObject.matrixWorld);
+    tempScaleFromPosition.setFromMatrixPosition(fromObject.matrixWorld);
+    const distance = tempScaleFromPosition.distanceTo(tempScaleToPosition);
+    if (distance < minDistance) {
+      return minScale;
+    } else {
+      return Math.min(maxScale, minScale + (maxScale - minScale) * volume * 8 * (distance / 25));
+    }
+  };
+})();
 
 /**
  * Provides access to the end effectors for IK.
@@ -95,6 +113,7 @@ AFRAME.registerComponent("ik-controller", {
     this._updateIsInView = this._updateIsInView.bind(this);
     this.avatarSystem = this.el.sceneEl.systems["hubs-systems"].avatarSystem;
     this.skyBeamSystem = this.el.sceneEl.systems["hubs-systems"].skyBeamSystem;
+    this.headScale = new THREE.Vector3();
 
     if (this.data.instanceHeads) {
       this.avatarSystem.register(this.el, this.data.isSelf);
@@ -126,15 +145,18 @@ AFRAME.registerComponent("ik-controller", {
     if (!isMine(this.ikRoot.el)) {
       this.remoteNetworkedAvatar = this.ikRoot.el.components["networked-avatar"];
       this.scaleAudioFeedback = null;
-      this.relativeMotionProgress = 0.0;
-      this.relativeMotionMaxMagnitude = 1;
     }
+
+    this.relativeMotionProgress = 0.0;
+    this.relativeMotionMaxMagnitude = 1;
+    this.jumpMotionProgress = 0.0;
 
     this.isInView = true;
     this.hasConvergedHips = false;
     this.lastCameraTransform = new THREE.Matrix4();
     waitForDOMContentLoaded().then(() => {
       this.playerCamera = document.getElementById("viewing-camera").getObject3D("camera");
+      this.audioFeedbackScale = 1.0;
     });
 
     this.el.sceneEl.systems["frame-scheduler"].schedule(this._runScheduledWork, "ik");
@@ -175,8 +197,6 @@ AFRAME.registerComponent("ik-controller", {
       if (!this.data.isSelf) {
         this.skyBeamSystem.register(this.head, true);
       }
-
-      this.scaleAudioFeedback = this.head.el.components["scale-audio-feedback"];
     }
 
     if (this.data.neck !== oldData.neck) {
@@ -211,6 +231,7 @@ AFRAME.registerComponent("ik-controller", {
     if (!this.ikRoot) {
       return;
     }
+
     const { camera, leftController, rightController } = this.ikRoot;
 
     const root = this.ikRoot.el.object3D;
@@ -220,24 +241,40 @@ AFRAME.registerComponent("ik-controller", {
     // When a remote avatar is moving forward, we lean it forward and 'squish' it
     let relativeMotionSpring = 0;
     let relativeMotionValue = 0;
+    let isJumping = false;
+    let jumpMotionSpring = false;
 
     if (this.remoteNetworkedAvatar) {
       relativeMotionValue = this.remoteNetworkedAvatar.data.relative_motion;
+      isJumping = this.remoteNetworkedAvatar.data.is_jumping;
+    } else {
+      relativeMotionValue = SYSTEMS.characterController.relativeMotionValue;
+      isJumping = SYSTEMS.characterController.jumpYVelocity !== null && SYSTEMS.characterController.jumpYVelocity > 2.5;
+    }
 
-      if (relativeMotionValue !== 0) {
-        const t = this.relativeMotionProgress;
-        relativeMotionSpring = springStep(t);
-        this.relativeMotionProgress = Math.min(1, this.relativeMotionProgress + dt * 0.003);
-        this.relativeMotionMaxMagnitude = Math.max(this.relativeMotionMaxMagnitude, Math.abs(relativeMotionValue));
-      } else {
-        const t = 1.0 - this.relativeMotionProgress;
-        relativeMotionSpring = 1.0 - springStep(t);
-        this.relativeMotionProgress = Math.max(0, this.relativeMotionProgress - dt * 0.003);
+    if (relativeMotionValue !== 0) {
+      const t = this.relativeMotionProgress;
+      relativeMotionSpring = squeezeSpringStep(t);
+      this.relativeMotionProgress = Math.min(1, this.relativeMotionProgress + dt * 0.003);
+      this.relativeMotionMaxMagnitude = Math.max(this.relativeMotionMaxMagnitude, Math.abs(relativeMotionValue));
+    } else {
+      const t = 1.0 - this.relativeMotionProgress;
+      relativeMotionSpring = 1.0 - squeezeSpringStep(t);
+      this.relativeMotionProgress = Math.max(0, this.relativeMotionProgress - dt * 0.003);
 
-        if (this.relativeMotionProgress === 0) {
-          this.relativeMotionMaxMagnitude = 0;
-        }
+      if (this.relativeMotionProgress === 0) {
+        this.relativeMotionMaxMagnitude = 0;
       }
+    }
+
+    if (isJumping) {
+      const t = this.jumpMotionProgress;
+      jumpMotionSpring = jumpSpringStep(t);
+      this.jumpMotionProgress = Math.min(1, this.jumpMotionProgress + dt * 0.007);
+    } else {
+      const t = 1.0 - this.jumpMotionProgress;
+      jumpMotionSpring = 1.0 - jumpSpringStep(t);
+      this.jumpMotionProgress = Math.max(0, this.jumpMotionProgress - dt * 0.004);
     }
 
     camera.object3D.updateMatrix();
@@ -360,30 +397,60 @@ AFRAME.registerComponent("ik-controller", {
         }
       }
 
-      let feedbackScale = 1.0;
-
-      if (this.scaleAudioFeedback) {
-        feedbackScale = this.scaleAudioFeedback.audioFeedbackScale;
-      }
-
-      // Perform head velocity squish + rotate on other avatars
+      // Perform audio scale, head velocity squish + rotate on other avatars
       if (!this.data.isSelf) {
-        let sx, sy, sz;
+        let feedbackScale = 1.0;
+
+        if (!this.analyser && this.head) {
+          const analyserEl = findAncestorWithComponent(this.head.el, "networked-audio-analyser");
+          if (analyserEl) {
+            this.analyser = analyserEl.components["networked-audio-analyser"];
+          }
+        }
+
+        if (this.analyser && this.playerCamera) {
+          const minScale = 1;
+          const maxScale = 1.25;
+          const minDistance = 0.3;
+
+          // Set here, but updated in ik-controller since we also scale head there.
+          feedbackScale = getAudioFeedbackScale(
+            head,
+            this.playerCamera,
+            minDistance,
+            minScale,
+            maxScale,
+            this.analyser.volume
+          );
+        }
+
         if (relativeMotionSpring !== 0) {
           const scaleDXZ = 1.0 + relativeMotionSpring * 0.1 * this.relativeMotionMaxMagnitude;
           const scaleDY = 1.0 - relativeMotionSpring * 0.1 * this.relativeMotionMaxMagnitude;
-          sx = scaleDXZ * feedbackScale;
-          sy = scaleDY * feedbackScale;
-          sz = scaleDXZ * feedbackScale;
+          this.headScale.set(scaleDXZ * feedbackScale, scaleDY * feedbackScale, scaleDXZ * feedbackScale);
+        } else if (jumpMotionSpring !== 0) {
+          const scaleDXZ = 1.0 - jumpMotionSpring * 0.15;
+          const scaleDY = 1.0 + jumpMotionSpring * 0.15;
+          this.headScale.set(scaleDXZ * feedbackScale, scaleDY * feedbackScale, scaleDXZ * feedbackScale);
         } else {
-          sx = feedbackScale;
-          sy = feedbackScale;
-          sz = feedbackScale;
+          this.headScale.set(feedbackScale, feedbackScale, feedbackScale);
         }
 
-        if (!almostEqual(head.scale.x, sx) || !almostEqual(head.scale.y, sy) || !almostEqual(head.scale.z, sz)) {
-          head.scale.set(sx, sy, sz);
+        if (!almostEqualVec3(head.scale, this.headScale)) {
+          head.scale.copy(this.headScale);
           head.matrixNeedsUpdate = true;
+        }
+      } else {
+        if (relativeMotionSpring !== 0) {
+          const scaleDXZ = 1.0 + relativeMotionSpring * 0.1 * this.relativeMotionMaxMagnitude;
+          const scaleDY = 1.0 - relativeMotionSpring * 0.1 * this.relativeMotionMaxMagnitude;
+          this.headScale.set(scaleDXZ, scaleDY, scaleDXZ);
+        } else if (jumpMotionSpring !== 0) {
+          const scaleDXZ = 1.0 - jumpMotionSpring * 0.15;
+          const scaleDY = 1.0 + jumpMotionSpring * 0.15;
+          this.headScale.set(scaleDXZ, scaleDY, scaleDXZ);
+        } else {
+          this.headScale.set(1.0, 1.0, 1.0);
         }
       }
     }
