@@ -1,9 +1,11 @@
 import Raven from "raven-js";
 import configs from "./utils/configs";
 
-const ga = window.ga;
+function gtag() {
+  window.dataLayer.push(arguments);
+}
 
-export default function registerTelemetry(trackedPage, trackedTitle) {
+export default function registerTelemetry() {
   const sentryDsn = configs.SENTRY_DSN;
   const gaTrackingId = configs.GA_TRACKING_ID;
 
@@ -12,19 +14,20 @@ export default function registerTelemetry(trackedPage, trackedTitle) {
     Raven.config(sentryDsn).install();
   }
 
-  if (ga && gaTrackingId) {
-    console.log("Tracking: Google Analytics ID: " + gaTrackingId);
+  if (gaTrackingId) {
+    console.log("Tracking: GA Tracking ID: " + gaTrackingId);
 
-    ga("create", gaTrackingId, "auto");
+    const el = document.createElement("script");
+    el.type = "text/javascript";
+    el.setAttribute("async", "true");
+    el.setAttribute("src", `https://www.googletagmanager.com/gtag/js?id=${gaTrackingId}`);
+    el.addEventListener("load", () => {
+      window.dataLayer = window.dataLayer || [];
 
-    if (trackedPage) {
-      ga("set", "page", trackedPage);
-    }
+      gtag("js", new Date());
+      gtag("config", gaTrackingId);
+    });
 
-    if (trackedTitle) {
-      ga("set", "title", trackedTitle);
-    }
-
-    ga("send", "pageview");
+    document.documentElement.firstChild.appendChild(el);
   }
 }

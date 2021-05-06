@@ -93,7 +93,7 @@ export class AppAwareMouseDevice {
         rawIntersections
       );
       const intersection = rawIntersections.find(x => x.object.el);
-      const remoteHoverTarget = intersection && findRemoteHoverTarget(intersection.object);
+      const remoteHoverTarget = intersection && findRemoteHoverTarget(intersection.object, intersection.instanceId);
       const isInteractable = intersection && intersection.object.el.matches(".interactable, .interactable *");
       const template = remoteHoverTarget && getNetworkedTemplate(remoteHoverTarget);
       const isStaticControlledMedia = template && template === "#static-controlled-media";
@@ -181,7 +181,8 @@ export class AppAwareMouseDevice {
       this.lockClickCoordDelta[1] === 0 &&
       !isTransforming &&
       !this.grabGesturedAnything &&
-      now < this.hideCursorAfterIdleTime
+      now < this.hideCursorAfterIdleTime &&
+      !SYSTEMS.directorSystem.trackingCamera
     );
 
     // The 3D cursor visibility is coordinated via CSS classes on the body.
@@ -191,7 +192,8 @@ export class AppAwareMouseDevice {
       !this.grabGesturedAnything &&
       !showCSSCursor &&
       (!isMouseLookingGesture || this.lockClickCoordDelta[0] !== 0 || this.lockClickCoordDelta[1] !== 0) &&
-      now < this.hideCursorAfterIdleTime
+      now < this.hideCursorAfterIdleTime &&
+      !SYSTEMS.directorSystem.trackingCamera
     );
 
     const bodyClassList = document.body.classList;

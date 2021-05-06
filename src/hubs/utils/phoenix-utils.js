@@ -1,6 +1,10 @@
 import { Socket } from "phoenix";
 import { Presence } from "phoenix";
 import configs from "../utils/configs";
+import { getDefaultWorldColorPreset } from "../../jel/utils/world-color-presets";
+
+const MIN_DEFAULT_WORLD_TYPE = 1;
+const MAX_DEFAULT_WORLD_TYPE = 3;
 
 export function hasReticulumServer() {
   return !!configs.RETICULUM_SERVER;
@@ -189,17 +193,19 @@ export async function createSpace(name) {
 
 export async function createHub(
   spaceId,
+  type,
   name,
   template,
   worldType = null,
   worldSeed = null,
+  worldColors = null,
   spawnPosition = null,
   spawnRotation = null,
   spawnRadius = null
 ) {
   const store = window.APP.store;
   const createUrl = getReticulumFetchUrl("/api/v1/hubs");
-  const payload = { hub: { name, space_id: spaceId } };
+  const payload = { hub: { name, type: type, space_id: spaceId } };
 
   if (template) {
     payload.hub.template = template;
@@ -207,10 +213,21 @@ export async function createHub(
 
   if (worldType !== null) {
     payload.hub.world_type = worldType;
+  } else {
+    payload.hub.world_type =
+      MIN_DEFAULT_WORLD_TYPE + Math.floor(Math.random() * (MAX_DEFAULT_WORLD_TYPE - MIN_DEFAULT_WORLD_TYPE + 1));
   }
 
   if (worldSeed !== null) {
     payload.hub.world_seed = worldSeed;
+  }
+
+  if (worldColors === null) {
+    worldColors = getDefaultWorldColorPreset();
+  }
+
+  for (const [k, v] of Object.entries(worldColors)) {
+    payload.hub[`world_${k}`] = v;
   }
 
   if (spawnPosition != null) {
@@ -235,41 +252,29 @@ export async function createHub(
     headers.authorization = `bearer ${store.state.credentials.token}`;
   }
 
-  let res = await fetch(createUrl, {
+  return await fetch(createUrl, {
     body: JSON.stringify(payload),
     headers,
     method: "POST"
   }).then(r => r.json());
-
-  if (res.error === "invalid_token") {
-    // Clear the invalid token from store.
-    store.clearCredentials();
-
-    // Create hub anonymously
-    delete headers.authorization;
-    res = await fetch(createUrl, {
-      body: JSON.stringify(payload),
-      headers,
-      method: "POST"
-    }).then(r => r.json());
-  }
-
-  return res;
 }
 
-export async function createAndRedirectToNewHub(spaceId, name, sceneId, replace) {
-  const hub = await createHub(name, sceneId);
-  let url = hub.url;
+export async function createVox(spaceId) {
+  const store = window.APP.store;
+  const createUrl = getReticulumFetchUrl("/api/v1/vox");
+  const payload = { vox: { space_id: spaceId } };
 
-  if (isLocalClient()) {
-    url = `/hub.html?hub_id=${hub.hub_id}&space_id=${hub.space_id}`;
+  const headers = { "content-type": "application/json" };
+
+  if (store.state && store.state.credentials.token) {
+    headers.authorization = `bearer ${store.state.credentials.token}`;
   }
 
-  if (replace) {
-    document.location.replace(url);
-  } else {
-    document.location = url;
-  }
+  return await fetch(createUrl, {
+    body: JSON.stringify(payload),
+    headers,
+    method: "POST"
+  }).then(r => r.json());
 }
 
 export function getPresenceEntryForSession(presences, sessionId) {

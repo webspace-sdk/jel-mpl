@@ -19,6 +19,7 @@ module.exports = {
     TERRAIN: 10,
     FIELD: 100,
     PHYSICS_DEBUG: 1000,
+    VOX: 5000,
     MEDIA: 10000,
     MEDIA_NO_FXAA: 10010, // Render last because of stencil ops
     TOON: 20000, // Render last because of stencil ops
@@ -31,5 +32,6 @@ module.exports = {
 
     // Transparent objects:
     WATER: 1
-  }
+  },
+  WORLD_COLOR_TYPES: ["ground", "edge", "leaves", "bark", "rock", "grass", "sky", "water"]
 };

@@ -8,7 +8,6 @@ import { validMaterials } from "../components/hoverable-visuals";
 import { proxiedUrlFor, guessContentType } from "../utils/media-url-utils";
 import { getNetworkedEntity, getNetworkId, ensureOwnership, isSynchronized } from "../../jel/utils/ownership-utils";
 import { addVertexCurvingToShader } from "../../jel/systems/terrain-system";
-import { getMessages } from "../../hubs/utils/i18n";
 import { SOUND_MEDIA_REMOVED } from "../systems/sound-effects-system";
 import anime from "animejs";
 
@@ -61,6 +60,16 @@ export const GROUNDABLE_MEDIA_VIEW_COMPONENTS = [
   "media-pdf",
   "media-emoji"
 ];
+
+export const ORBIT_ON_INSPECT_MEDIA_VIEW_COMPONENTS = ["gltf-model-plus", "media-vox", "media-emoji"];
+
+export const shouldOrbitOnInspect = function(obj) {
+  for (const component of ORBIT_ON_INSPECT_MEDIA_VIEW_COMPONENTS) {
+    if (obj.el.components[component]) return true;
+  }
+
+  return false;
+};
 
 const linkify = Linkify();
 linkify.tlds(tlds);
@@ -194,6 +203,7 @@ export function coerceToUrl(urlOrText) {
   return urlOrText.indexOf("://") >= 0 ? urlOrText : `https://${urlOrText}`;
 }
 
+// Adds media. this function signature is out of control and should be refactored to take an object.
 export const addMedia = (
   src,
   contents,
@@ -208,7 +218,8 @@ export const addMedia = (
   parentEl = null,
   linkedEl = null,
   networkId = null,
-  showLoader = true
+  skipLoader = false,
+  contentType = null
 ) => {
   const scene = AFRAME.scenes[0];
 
@@ -256,6 +267,8 @@ export const addMedia = (
     isEmoji = match && match[0] === trimmed;
   }
 
+  const createdAt = Math.floor(NAF.connection.getServerTime());
+
   entity.setAttribute("media-loader", {
     fitToBox,
     resolve,
@@ -263,12 +276,14 @@ export const addMedia = (
     src: typeof src === "string" && contents === null ? coerceToUrl(src) || src : "",
     initialContents: contents != null ? contents : null,
     addedLocally: true,
-    showLoader,
+    createdAt,
+    skipLoader,
     version,
     contentSubtype,
     linkedEl,
     mediaLayer,
-    mediaOptions
+    mediaOptions,
+    contentType
   });
 
   if (contents && !isEmoji) {
@@ -328,7 +343,7 @@ export const addMedia = (
 };
 
 // Animates the given object to the terrain ground.
-export const groundMedia = (sourceEl, faceUp) => {
+export const groundMedia = (sourceEl, faceUp, bbox = null, meshOffset = 0.0) => {
   const { object3D } = sourceEl;
   const finalXRotation = faceUp ? (3.0 * Math.PI) / 2.0 : 0.0;
   const px = object3D.rotation.x;
@@ -338,8 +353,10 @@ export const groundMedia = (sourceEl, faceUp) => {
   object3D.traverse(o => (o.matrixNeedsUpdate = true));
   object3D.updateMatrixWorld();
 
-  const bbox = new THREE.Box3();
-  bbox.expandByObject(object3D);
+  if (bbox === null) {
+    bbox = new THREE.Box3();
+    bbox.expandByObject(object3D);
+  }
 
   object3D.rotation.x = px;
   object3D.rotation.z = pz;
@@ -353,7 +370,7 @@ export const groundMedia = (sourceEl, faceUp) => {
 
   const terrainSystem = AFRAME.scenes[0].systems["hubs-systems"].terrainSystem;
   const terrainHeight = terrainSystem.getTerrainHeightAtWorldCoord(x, z);
-  const finalYPosition = objectHeight * 0.5 + terrainHeight;
+  const finalYPosition = objectHeight * 0.5 + meshOffset + terrainHeight;
 
   const step = (function() {
     const lastValue = {};
@@ -416,7 +433,7 @@ export const cloneMedia = (sourceEl, template, src = null, networked = true, lin
     }
   }
 
-  const { contentSubtype, fitToBox, mediaOptions } = sourceEl.components["media-loader"].data;
+  const { contentType, contentSubtype, fitToBox, mediaOptions } = sourceEl.components["media-loader"].data;
 
   return addMedia(
     src,
@@ -430,7 +447,10 @@ export const cloneMedia = (sourceEl, template, src = null, networked = true, lin
     { ...mediaOptions, ...extraMediaOptions },
     networked,
     parentEl,
-    link ? sourceEl : null
+    link ? sourceEl : null,
+    null,
+    false,
+    contentType
   );
 };
 
@@ -727,7 +747,6 @@ export const MEDIA_PRESENCE = {
 const MIN_ASPECT_RATIO_TO_BATCH = 1.0 / 8.0;
 const MAX_ASPECT_RATIO_TO_BATCH = 1.0 / MIN_ASPECT_RATIO_TO_BATCH;
 const MAX_PIXELS_TO_BATCH = 1024 * 1024 * 4;
-export const DEFAULT_HUB_NAME = getMessages()["hub.unnamed-title"];
 
 export function meetsBatchingCriteria(textureInfo) {
   if (!textureInfo.width || !textureInfo.height) return false;
@@ -812,6 +831,7 @@ export const spawnMediaInfrontOfPlayer = (
   contentSubtype = null,
   mediaOptions = null,
   networked = true,
+  skipResolve = false,
   zOffset = -1.5,
   yOffset = 0
 ) => {
@@ -824,7 +844,7 @@ export const spawnMediaInfrontOfPlayer = (
     "#interactable-media",
     contentOrigin,
     contentSubtype,
-    !!(src && !(src instanceof MediaStream)),
+    !skipResolve && !!(src && !(src instanceof MediaStream) && (typeof src !== "string" || !src.startsWith("jel://"))),
     true,
     true,
     mediaOptions,

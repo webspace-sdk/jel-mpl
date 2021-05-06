@@ -3,6 +3,7 @@ import "./hubs/utils/theme";
 import "@babel/polyfill";
 import "./hubs/utils/debug-log";
 import { isInQuillEditor } from "./jel/utils/quill-utils";
+import { homeHubForSpaceId } from "./jel/utils/membership-utils";
 import { CURSOR_LOCK_STATES, getCursorLockState } from "./jel/utils/dom-utils";
 import mixpanel from "mixpanel-browser";
 
@@ -112,7 +113,7 @@ import "./jel/components/pinned-to-self";
 import "./jel/components/look-at-self";
 import Subscriptions from "./hubs/subscriptions";
 
-import { SOUND_QUACK, SOUND_SPECIAL_QUACK } from "./hubs/systems/sound-effects-system";
+import { SOUND_QUACK, SOUND_SPECIAL_QUACK, SOUND_NOTIFICATION } from "./hubs/systems/sound-effects-system";
 import ducky from "./assets/hubs/models/DuckyMesh.glb";
 import { getAbsoluteHref } from "./hubs/utils/media-url-utils";
 
@@ -128,11 +129,12 @@ import DynaChannel from "./jel/utils/dyna-channel";
 import SpaceChannel from "./hubs/utils/space-channel";
 import HubChannel from "./hubs/utils/hub-channel";
 import LinkChannel from "./hubs/utils/link-channel";
+import Matrix from "./jel/utils/matrix";
 import AtomMetadata, { ATOM_TYPES } from "./jel/utils/atom-metadata";
 import { joinSpace, joinHub } from "./hubs/utils/jel-init";
 import { connectToReticulum } from "./hubs/utils/phoenix-utils";
 import { disableiOSZoom } from "./hubs/utils/disable-ios-zoom";
-import { getHubIdFromHistory, getSpaceIdFromHistory } from "./jel/utils/jel-url-utils";
+import { getHubIdFromHistory, getSpaceIdFromHistory, navigateToHubUrl } from "./jel/utils/jel-url-utils";
 import { handleExitTo2DInterstitial, exit2DInterstitialAndEnterVR } from "./hubs/utils/vr-interstitial";
 import { getAvatarSrc } from "./hubs/utils/avatar-utils.js";
 import SceneEntryManager from "./hubs/scene-entry-manager";
@@ -169,7 +171,7 @@ import { platformUnsupported } from "./hubs/support";
 
 window.APP = new App();
 const store = window.APP.store;
-const subscriptions = new Subscriptions();
+const subscriptions = new Subscriptions(store);
 window.APP.subscriptions = subscriptions;
 
 store.update({ preferences: { shouldPromptForRefresh: undefined } });
@@ -183,6 +185,7 @@ const hubChannel = new HubChannel(store);
 const linkChannel = new LinkChannel(store);
 const spaceMetadata = new AtomMetadata(ATOM_TYPES.SPACE);
 const hubMetadata = new AtomMetadata(ATOM_TYPES.HUB);
+const matrix = new Matrix(store, spaceMetadata, hubMetadata);
 
 window.APP.history = history;
 window.APP.accountChannel = accountChannel;
@@ -193,6 +196,7 @@ window.APP.authChannel = authChannel;
 window.APP.linkChannel = linkChannel;
 window.APP.hubMetadata = hubMetadata;
 window.APP.spaceMetadata = spaceMetadata;
+window.APP.matrix = matrix;
 
 store.addEventListener("profilechanged", spaceChannel.sendProfileUpdate.bind(hubChannel));
 
@@ -248,6 +252,8 @@ const isBotMode = qsTruthy("bot");
 const isTelemetryDisabled = qsTruthy("disable_telemetry");
 const isDebug = qsTruthy("debug");
 const disablePausing = qsTruthy("no_pause") || isBotMode;
+const skipNeon = qsTruthy("skip_neon");
+const skipPanels = qsTruthy("skip_panels");
 
 if (isBotMode) {
   const token = qs.get("credentials_token");
@@ -259,7 +265,7 @@ if (isBotMode) {
 }
 
 if (!isBotMode && !isTelemetryDisabled) {
-  registerTelemetry("/hub", "Room Landing Page");
+  registerTelemetry();
 
   // Can't do this in the other file otherwise get a mixpanel error
   if (configs.MIXPANEL_TOKEN) {
@@ -517,7 +523,7 @@ function initBatching() {
     .setAttribute("media-image", { batch: true, src: initialBatchImage, contentType: "image/png" });
 }
 
-function addGlobalEventListeners(scene, entryManager) {
+function addGlobalEventListeners(scene, entryManager, matrix) {
   scene.addEventListener("scene_selected_media_layer_changed", ({ detail: { selectedMediaLayer } }) => {
     remountJelUI({ selectedMediaLayer });
   });
@@ -560,6 +566,9 @@ function addGlobalEventListeners(scene, entryManager) {
         break;
       case "banner":
         scene.emit("add_media_text", "banner");
+        break;
+      case "vox_new":
+        scene.emit("add_media_vox", "");
         break;
       case "voxmoji":
         scene.emit("action_show_emoji_picker", "");
@@ -668,12 +677,39 @@ function addGlobalEventListeners(scene, entryManager) {
   scene.addEventListener("terrain_chunk_loading_complete", () => {
     if (!performedInitialQualityBoost && !isBotMode) {
       performedInitialQualityBoost = true;
-      window.APP.detailLevel = 0;
-      scene.renderer.setPixelRatio(window.devicePixelRatio);
+
+      let setToHighDetail = true;
+
+      if (window.APP.store.state.settings.defaultDetailLevel) {
+        const now = Math.floor(new Date() / 1000.0);
+
+        if (window.APP.store.state.settings.defaultDetailLevelUntilSeconds > 1700000000) {
+          // TODO Bug workaround, remove after 4/1/21
+          window.APP.store.update({ settings: { defaultDetailLevelUntilSeconds: Math.floor(new Date() / 1000) } });
+        }
+
+        // The default detail level has an expiration date, for cases where the user has
+        // re-configured their machine properly to use the GPU, etc.
+        const applyUntil = window.APP.store.state.settings.defaultDetailLevelUntilSeconds;
+        const shouldApplyDefaultDetailLevel = now < applyUntil;
+
+        if (shouldApplyDefaultDetailLevel) {
+          window.APP.detailLevel = window.APP.store.state.settings.defaultDetailLevel;
+          setToHighDetail = false;
+        }
+      }
+
+      // If not overridden, set the detail level to high and assume auto quality system will handle it.
+      if (setToHighDetail) {
+        window.APP.detailLevel = 0;
+        scene.renderer.setPixelRatio(window.devicePixelRatio);
+      }
+
       mixpanel.track("Event First World Load Complete", {});
     }
 
-    scene.systems["hubs-systems"].autoQualitySystem.startTracking();
+    SYSTEMS.atmosphereSystem.enableAmbience();
+    SYSTEMS.autoQualitySystem.startTracking();
   });
 
   scene.addEventListener("action_reset_objects", () => {
@@ -683,12 +719,23 @@ function addGlobalEventListeners(scene, entryManager) {
 
     resetTemplate(metadata.template.name);
   });
+
+  matrix.addEventListener("left_room_for_hub", ({ detail: { hubId } }) => {
+    // If the matrix server kicked us from a room for the current hub, navigate
+    // to the home hub for now.
+    if (hubChannel.hubId === hubId) {
+      const spaceId = spaceChannel.spaceId;
+      const homeHub = homeHubForSpaceId(spaceId, accountChannel.memberships);
+      navigateToHubUrl(history, homeHub.url);
+    }
+  });
 }
 
 // Attempts to pause a-frame scene and rendering if tabbed away or maximized and window is blurred
-function setupNonVisibleHandler(scene) {
+function setupGameEnginePausing(scene) {
   const physics = scene.systems["hubs-systems"].physicsSystem;
   const autoQuality = scene.systems["hubs-systems"].autoQualitySystem;
+  let disableAmbienceTimeout = null;
 
   const webglLoseContextExtension = scene.renderer.getContext().getExtension("WEBGL_lose_context");
 
@@ -696,6 +743,10 @@ function setupNonVisibleHandler(scene) {
     if (document.visibilityState === "hidden" || hidden) {
       if (document.visibilityState === "visible") {
         scene.pause();
+
+        // THREE bug - if this clock is not stopped we end up lerping audio listener positions over a long duration
+        // because getDelta() returns a large value on resume.
+        scene.audioListener && scene.audioListener._clock.stop();
         scene.renderer.animation.stop();
         SYSTEMS.externalCameraSystem.stopRendering();
       }
@@ -704,23 +755,36 @@ function setupNonVisibleHandler(scene) {
       autoQuality.stopTracking();
       physics.updateSimulationRate(1000.0 / 15.0);
       accountChannel.setInactive();
+      clearTimeout(disableAmbienceTimeout);
+
+      disableAmbienceTimeout = setTimeout(() => {
+        SYSTEMS.atmosphereSystem.disableAmbience();
+      }, 15000);
     } else {
-      if (document.visibilityState === "visible") {
-        // Hacky. On some platforms GL context needs to be explicitly restored. So do it.
-        // This really shouldn't be necessary :P
-        if (scene.renderer.getContext().isContextLost() && webglLoseContextExtension) {
-          webglLoseContextExtension.restoreContext();
+      if (!scene.is("off")) {
+        if (document.visibilityState === "visible") {
+          // Hacky. On some platforms GL context needs to be explicitly restored. So do it.
+          // This really shouldn't be necessary :P
+          if (
+            (!scene.renderer.getContext() || scene.renderer.getContext().isContextLost()) &&
+            webglLoseContextExtension
+          ) {
+            webglLoseContextExtension.restoreContext();
+          }
+
+          scene.audioListener && scene.audioListener._clock.start();
+          scene.play();
+          scene.renderer.animation.start();
+          SYSTEMS.externalCameraSystem.startRendering();
+          autoQuality.startTracking();
         }
 
-        scene.play();
-        scene.renderer.animation.start();
-        SYSTEMS.externalCameraSystem.startRendering();
-        autoQuality.startTracking();
+        clearTimeout(disableAmbienceTimeout);
+        document.body.classList.remove("paused");
+        physics.updateSimulationRate(1000.0 / 90.0);
+        accountChannel.setActive();
+        SYSTEMS.atmosphereSystem.enableAmbience();
       }
-
-      document.body.classList.remove("paused");
-      physics.updateSimulationRate(1000.0 / 90.0);
-      accountChannel.setActive();
     }
   };
 
@@ -733,6 +797,11 @@ function setupNonVisibleHandler(scene) {
     window.addEventListener("blur", () => {
       // When setting up bridge, bridge iframe can steal focus
       if (SYSTEMS.videoBridgeSystem.isSettingUpBridge) return;
+
+      // May be an iframe, don't pause in that case
+      if (document.activeElement.contentWindow && document.activeElement.contentWindow.document.hasFocus()) {
+        return;
+      }
 
       const disableBlurHandlerOnceIfVisible = window.APP.disableBlurHandlerOnceIfVisible;
       window.APP.disableBlurHandlerOnceIfVisible = false;
@@ -753,6 +822,18 @@ function setupNonVisibleHandler(scene) {
       apply(false);
     });
   }
+
+  scene.addEventListener("stateadded", ({ detail }) => {
+    if (detail === "off") {
+      apply(true);
+    }
+  });
+
+  scene.addEventListener("stateremoved", ({ detail }) => {
+    if (detail === "off") {
+      apply(false);
+    }
+  });
 }
 
 function setupSidePanelLayout(scene) {
@@ -765,7 +846,8 @@ function setupSidePanelLayout(scene) {
           document.documentElement.style.setProperty(`--${cssVars[i]}`, `${w}px`);
         }
 
-        scene.systems["hubs-systems"].uiAnimationSystem.applySceneSize(isLeft ? w : null, !isLeft ? w : null, true);
+        SYSTEMS.uiAnimationSystem.applySceneSize(isLeft ? w : null, !isLeft ? w : null, true);
+        SYSTEMS.uiAnimationSystem.setTargetSceneSizes();
         scene.resize();
 
         storeCallback(w);
@@ -785,25 +867,32 @@ function setupSidePanelLayout(scene) {
     });
   };
 
-  handleSidebarResizerDrag(
-    "#nav-drag-target",
-    ["nav-width"],
-    true,
-    400,
-    600,
-    x => x,
-    w => store.update({ uiState: { navPanelWidth: w } })
-  );
+  if (skipPanels) {
+    for (const id of ["#nav-drag-target", "#presence-drag-target"]) {
+      const el = document.querySelector(id);
+      el.parentNode.removeChild(el);
+    }
+  } else {
+    handleSidebarResizerDrag(
+      "#nav-drag-target",
+      ["nav-width"],
+      true,
+      400,
+      600,
+      x => x,
+      w => store.update({ uiState: { navPanelWidth: w } })
+    );
 
-  handleSidebarResizerDrag(
-    "#presence-drag-target",
-    ["presence-width"],
-    false,
-    220,
-    300,
-    x => window.innerWidth - x,
-    w => store.update({ uiState: { presencePanelWidth: w } })
-  );
+    handleSidebarResizerDrag(
+      "#presence-drag-target",
+      ["presence-width"],
+      false,
+      220,
+      300,
+      x => window.innerWidth - x,
+      w => store.update({ uiState: { presencePanelWidth: w } })
+    );
+  }
 }
 
 function setupVREventHandlers(scene, availableVREntryTypesPromise) {
@@ -967,7 +1056,14 @@ async function start() {
         .register("/jel.service.js")
         .then(() => {
           navigator.serviceWorker.ready
-            .then(registration => subscriptions.setRegistration(registration))
+            .then(registration => {
+              subscriptions.setRegistration(registration);
+              navigator.serviceWorker.addEventListener("message", event => {
+                if (event.data.action === "play_notification_sound") {
+                  SYSTEMS.soundEffectsSystem.playSoundOneShot(SOUND_NOTIFICATION);
+                }
+              });
+            })
             .catch(e => console.error(e));
         })
         .catch(e => console.error(e));
@@ -983,7 +1079,7 @@ async function start() {
   hideCanvas();
 
   setupPerformConditionalSignin(entryManager);
-  await store.initProfile();
+  await store.initDefaults();
 
   warmSerializeElement();
   const quillPoolPromise = initQuillPool();
@@ -1025,9 +1121,9 @@ async function start() {
 
   await initAvatar();
 
-  addGlobalEventListeners(scene, entryManager);
+  addGlobalEventListeners(scene, entryManager, matrix);
   setupSidePanelLayout(scene);
-  setupNonVisibleHandler(scene);
+  setupGameEnginePausing(scene);
 
   window.dispatchEvent(new CustomEvent("hub_channel_ready"));
 
@@ -1096,7 +1192,16 @@ async function start() {
       scene.addEventListener("shared-adapter-ready", assignDocToken, { once: true });
     }
 
-    remountJelUI({ hubCan: hubMetadata.can.bind(hubMetadata) });
+    const hubCan = hubMetadata.can.bind(hubMetadata);
+    remountJelUI({ hubCan });
+
+    // Switch off building mode if we cannot spawn media
+    if (!hubCan("spawn_and_move_media", hubChannel.hubId)) {
+      if (SYSTEMS.builderSystem.enabled) {
+        SYSTEMS.builderSystem.toggle();
+        SYSTEMS.launcherSystem.toggle();
+      }
+    }
   });
 
   scene.addEventListener("adapter-ready", () => NAF.connection.adapter.setClientId(socket.params().session_id));
@@ -1118,19 +1223,44 @@ async function start() {
 
   const { token } = store.state.credentials;
   let membershipsPromise;
+  let isInitialAccountChannelJoin = true;
 
   if (token) {
     console.log(`Logged into account ${store.credentialsAccountId}`);
 
     const accountPhxChannel = socket.channel(`account:${store.credentialsAccountId}`, { auth_token: token });
+
     membershipsPromise = new Promise((res, rej) => {
       accountPhxChannel
         .join()
         .receive("ok", async accountInfo => {
-          const { subscriptions: existingSubscriptions } = accountInfo;
+          const { session_id: sessionId, subscriptions: existingSubscriptions } = accountInfo;
           accountChannel.syncAccountInfo(accountInfo);
-          remountJelUI({ memberships: accountChannel.memberships, hubSettings: accountChannel.hubSettings });
+
+          remountJelUI({
+            memberships: accountChannel.memberships,
+            hubSettings: accountChannel.hubSettings
+          });
+
+          if (isInitialAccountChannelJoin) {
+            if (!skipNeon) {
+              // Initialize connection to matrix homeserver.
+              await matrix.init(
+                scene,
+                subscriptions,
+                sessionId,
+                accountInfo.matrix_homeserver,
+                accountInfo.matrix_token,
+                accountInfo.matrix_user_id
+              );
+              remountJelUI({ roomForHubCan: matrix.roomForHubCan.bind(matrix) });
+            }
+
+            isInitialAccountChannelJoin = false;
+          }
+
           subscriptions.handleExistingSubscriptions(existingSubscriptions);
+
           res(accountChannel.memberships);
         })
         .receive("error", res => {
@@ -1174,7 +1304,7 @@ async function start() {
     joinHubPromise = null;
 
     if (hubChannel.hubId !== hubId && nextHubToJoin === hubId) {
-      joinHubPromise = joinHub(socket, history, entryManager, remountUI, remountJelUI);
+      joinHubPromise = joinHub(scene, socket, history, entryManager, remountUI, remountJelUI);
       await joinHubPromise;
     }
   };

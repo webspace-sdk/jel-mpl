@@ -154,6 +154,7 @@ function createVideoOrAudioEl(type) {
   el.muted = isIOS;
   el.preload = "auto";
   el.crossOrigin = "anonymous";
+  el.volume = 0; // Start video at volume zero so we don't hear it playing load + non-positionally
 
   return el;
 }
@@ -582,6 +583,8 @@ AFRAME.registerComponent("media-video", {
     }
 
     this.audio.setNodeSource(this.mediaElementAudioSource);
+    // Volume can now be maxxed out, was initialized to zero until plugged into sound system.
+    this.mediaElementAudioSource.mediaElement.volume = 1;
     this.el.setObject3D("sound", this.audio);
   },
 
@@ -669,8 +672,8 @@ AFRAME.registerComponent("media-video", {
           }
         }
 
-        // No way to cancel promises, so if src has changed while we were creating the texture just throw it away.
-        if (this.data.src !== src) {
+        // No way to cancel promises, so if src has changed while we were creating the texture just throw it away. Or, if the element was removed.
+        if (this.data.src !== src || !this.el.parentElement) {
           disposeTextureUnlessError(texture);
           return;
         }
@@ -837,6 +840,23 @@ AFRAME.registerComponent("media-video", {
       if (url.startsWith("jel://clients")) {
         const streamClientId = url.substring(7).split("/")[1]; // /clients/<client id>/video is only URL for now
         const stream = await NAF.connection.adapter.getMediaStream(streamClientId, "video");
+        if (this._onVideoStreamChanged) {
+          NAF.connection.adapter.removeEventListener("video_stream_changed", this._onVideoStreamChanged);
+        }
+
+        this._onVideoStreamChanged = async ({ detail: { peerId } }) => {
+          if (peerId !== streamClientId) return;
+          const stream = await NAF.connection.adapter.getMediaStream(peerId, "video").catch(e => {
+            console.error("Error getting video stream for ", peerId, e);
+          });
+
+          if (stream) {
+            videoEl.srcObject = new MediaStream(stream.getVideoTracks());
+            videoEl.play(); // Video is stopped if stream dies.
+          }
+        };
+
+        NAF.connection.adapter.addEventListener("video_stream_changed", this._onVideoStreamChanged);
         videoEl.srcObject = new MediaStream(stream.getVideoTracks());
         // If hls.js is supported we always use it as it gives us better events
       } else if (contentType.startsWith("application/dash")) {
@@ -1109,6 +1129,10 @@ AFRAME.registerComponent("media-video", {
       this.video.removeEventListener("pause", this.onPauseStateChange);
       this.video.removeEventListener("play", this.onPauseStateChange);
       this.video.removeEventListener("ended", this.onPauseStateChange);
+
+      if (this._onVideoStreamChanged) {
+        NAF.connection.adapter.removeEventListener("video_stream_changed", this._onVideoStreamChanged);
+      }
     }
 
     if (this.hoverMenu) {
