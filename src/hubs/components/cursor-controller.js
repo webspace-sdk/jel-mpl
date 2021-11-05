@@ -2,6 +2,7 @@ import { paths } from "../systems/userinput/paths";
 import { sets } from "../systems/userinput/sets";
 import { almostEqualVec3, getLastWorldPosition } from "../utils/three-utils";
 import { RENDER_ORDER } from "../constants";
+import { isLockedMedia } from "../utils/media-utils";
 import { waitForDOMContentLoaded } from "../utils/async-utils";
 
 const HIGHLIGHT = new THREE.Color(0, 0xec / 255, 0xff / 255);
@@ -42,6 +43,7 @@ AFRAME.registerComponent("cursor-controller", {
     waitForDOMContentLoaded().then(() => {
       this.cssGazeCursor = document.querySelector("#gaze-cursor .cursor");
       this.lastCssGazeCursorOffset = Infinity;
+      this.lastCssGazeCursorScale = Infinity;
     });
 
     const lineGeometry = new THREE.BufferGeometry();
@@ -92,14 +94,29 @@ AFRAME.registerComponent("cursor-controller", {
 
       const interaction = AFRAME.scenes[0].systems.interaction;
       const isGrabbing = left ? !!interaction.state.leftRemote.held : !!interaction.state.rightRemote.held;
-      if (!isGrabbing) {
+      const transformObjectSystem = AFRAME.scenes[0].systems["transform-selected-object"];
+      const raycastForTransform =
+        transformObjectSystem.transforming && transformObjectSystem.shouldCursorRaycastDuringTransform();
+
+      let intersectionTarget;
+
+      if (!isGrabbing || raycastForTransform) {
         rawIntersections.length = 0;
         this.raycaster.ray.origin = cursorPose.position;
         this.raycaster.ray.direction = cursorPose.direction;
         this.raycaster.intersectObjects(SYSTEMS.cursorTargettingSystem.targets, true, rawIntersections);
         this.intersection = rawIntersections[0];
-        this.intersectionIsValid = !!interaction.updateCursorIntersection(this.intersection, left);
-        this.distance = this.intersectionIsValid ? this.intersection.distance : this.data.defaultDistance * playerScale;
+        intersectionTarget = interaction.updateCursorIntersection(this.intersection, left);
+        this.intersectionIsValid = !!intersectionTarget;
+
+        const defaultDistance =
+          SYSTEMS.cameraSystem.defaultCursorDistanceToInspectedObject() || this.data.defaultDistance * playerScale;
+
+        this.distance = this.intersectionIsValid ? this.intersection.distance : defaultDistance;
+
+        if (raycastForTransform) {
+          transformObjectSystem.handleCursorRaycastIntersections(rawIntersections);
+        }
       }
 
       const { cursor, minDistance, far, camera } = this.data;
@@ -124,18 +141,30 @@ AFRAME.registerComponent("cursor-controller", {
         cursor.object3D.matrixNeedsUpdate = true;
       }
 
+      let cursorScale3D = 0.4;
+      let cursorScaleCSS = 0.4;
+
       // TODO : Check if the selected object being transformed is for this cursor!
-      const transformObjectSystem = AFRAME.scenes[0].systems["transform-selected-object"];
       if (
         transformObjectSystem.transforming &&
         ((left && transformObjectSystem.hand.el.id === "player-left-controller") ||
           (!left && transformObjectSystem.hand.el.id === "player-right-controller"))
       ) {
         this.color.copy(TRANSFORM_COLOR_1).lerpHSL(TRANSFORM_COLOR_2, 0.5 + 0.5 * Math.sin(t / 1000.0));
-      } else if (this.intersectionIsValid || isGrabbing) {
+        cursorScale3D = 0.66;
+        cursorScaleCSS = 1.0;
+      } else if ((this.intersectionIsValid || isGrabbing) && !isLockedMedia(intersectionTarget)) {
         this.color.copy(HIGHLIGHT);
+        cursorScale3D = 0.66;
+        cursorScaleCSS = 1.0;
       } else {
         this.color.copy(NO_HIGHLIGHT);
+      }
+
+      if (Math.abs(cursor.components["scale-in-screen-space"].data.baseScale.x - cursorScale3D) > 0.01) {
+        cursor.setAttribute("scale-in-screen-space", {
+          addedScale: { x: cursorScale3D, y: cursorScale3D, z: cursorScale3D }
+        });
       }
 
       const showCursor = document.body.classList.contains("show-3d-cursor");
@@ -145,9 +174,16 @@ AFRAME.registerComponent("cursor-controller", {
 
       // Huge hack, due to vertex curving, the CSS-based gaze cursor needs to be offset a bit
       // vertically based upon how far the intersection is in a way similar to the 3d cursor.
-      if (this.cssGazeCursor && this.lastCssGazeCursorOffset !== cssGazeYOffset) {
-        this.cssGazeCursor.setAttribute("style", `transform: translateY(${cssGazeYOffset}px);`);
+      if (
+        this.cssGazeCursor &&
+        (this.lastCssGazeCursorOffset !== cssGazeYOffset || this.lastCssGazeCursorScale !== cursorScaleCSS)
+      ) {
+        this.cssGazeCursor.setAttribute(
+          "style",
+          `transform: translateY(${cssGazeYOffset}px); transform: scale(${cursorScaleCSS}, ${cursorScaleCSS});`
+        );
         this.lastCssGazeCursorOffset = cssGazeYOffset;
+        this.lastCssGazeCursorScale = cursorScaleCSS;
       }
 
       const mesh = this.data.cursor.object3DMap.mesh;

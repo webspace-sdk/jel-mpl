@@ -1,4 +1,3 @@
-/* global fetch THREE */
 import URL_TICK from "../../assets/jel/sfx/click.wav";
 import URL_TICK_DOWN from "../../assets/jel/sfx/click-down.wav";
 import URL_TICK_ALT from "../../assets/jel/sfx/click-alt.wav";
@@ -80,6 +79,8 @@ export const SOUND_EMOJI_EQUIP = soundEnum++;
 export const SOUND_NOTIFICATION = soundEnum++;
 export const SOUND_OUTDOORS = soundEnum++;
 export const SOUND_WATER = soundEnum++;
+export const SOUND_LOCK = soundEnum++;
+export const SOUND_UNLOCK = soundEnum++;
 
 // Safari doesn't support the promise form of decodeAudioData, so we polyfill it.
 function decodeAudioData(audioContext, arrayBuffer) {
@@ -147,7 +148,9 @@ export class SoundEffectsSystem {
       [SOUND_EMOJI_EQUIP, URL_TICK_ALT],
       [SOUND_NOTIFICATION, URL_QUIET_POP],
       [SOUND_OUTDOORS, URL_OUTDOORS],
-      [SOUND_WATER, URL_WATER]
+      [SOUND_WATER, URL_WATER],
+      [SOUND_LOCK, URL_TACK],
+      [SOUND_UNLOCK, URL_TICK_ALT]
     ];
     const loading = new Map();
     const load = url => {
@@ -277,10 +280,10 @@ export class SoundEffectsSystem {
     source.loop = true;
     this.pendingAudioSourceNodes.push(source);
     this.pendingAudioStartTimes.push(startAt);
-    this.monoSourceFinalizers.push(() => gain.disconnect());
 
     // NOTE if you use this, disconnect() will not be called automaticlaly
     // for you because the source node is not connected to the destination
+    this.monoSourceFinalizers.push(() => {});
 
     return { gain, source };
   }
@@ -289,7 +292,6 @@ export class SoundEffectsSystem {
     const index = this.pendingAudioSourceNodes.indexOf(node);
     if (index !== -1) {
       this.monoSourceFinalizers[index]();
-
       this.pendingAudioSourceNodes.splice(index, 1);
       this.pendingAudioStartTimes.splice(index, 1);
       this.monoSourceFinalizers.splice(index, 1);

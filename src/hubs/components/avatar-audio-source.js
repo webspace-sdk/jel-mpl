@@ -97,6 +97,10 @@ AFRAME.registerComponent("avatar-audio-source", {
     audio.setNodeSource(mediaStreamSource);
     this.el.setObject3D(this.attrName, audio);
 
+    // Ensure panner node is positioned properly, even if tabbed away and
+    // tick loop isn't running.
+    audio.updateMatrixWorld();
+
     this.el.emit("sound-source-set", { soundSource: mediaStreamSource });
   },
 

@@ -58,7 +58,7 @@ if (debugMatrices) {
 - If you modify an object's matrix
       you MUST decompose() back onto its position, quaternion and scale and
       you MUST set matrixWorldNeedsUpdate (or matrixNeedsUpdate, but the former is more correct).
-      (applyMatrix() and updateMatrix() handle this for you)
+      (applyMatrix() updateMatrix() and setMatrix() handle this for you)
 - If you modify an object's matrixWorld
       you MUST make sure it has previously been modified so that it is not using its parent matrix as its own,
       you MUST update its local matrix,
@@ -123,7 +123,7 @@ THREE.Object3D.prototype.getWorldQuaternion = (function() {
   };
 })();
 
-THREE.Object3D.getWorldScale = (function() {
+THREE.Object3D.prototype.getWorldScale = (function() {
   const position = new THREE.Vector3();
   const quaternion = new THREE.Quaternion();
 
@@ -164,6 +164,13 @@ THREE.Object3D.prototype.applyMatrix = function() {
   applyMatrix.apply(this, arguments);
   this.matrixWorldNeedsUpdate = true;
   handleMatrixModification(this);
+};
+
+// New function to set the matrix properly
+THREE.Object3D.prototype.setMatrix = function(matrix) {
+  this.matrixWorldNeedsUpdate = true;
+  this.matrix.copy(matrix);
+  this.matrix.decompose(this.position, this.quaternion, this.scale);
 };
 
 // Updates this function to use updateMatrices(). In general our code should prefer calling updateMatrices() directly,
@@ -211,6 +218,7 @@ if (!debugMatrices) {
       this.hasHadFirstMatrixUpdate = true;
       this.matrixWorldNeedsUpdate = true;
       this.matrixNeedsUpdate = false;
+      this.childrenNeedMatrixWorldUpdate = false;
       this.worldMatrixConsumerFlags = 0x00;
       this.cachedMatrixWorld = this.matrixWorld;
     } else if (this.matrixNeedsUpdate || this.matrixAutoUpdate || forceLocalUpdate) {

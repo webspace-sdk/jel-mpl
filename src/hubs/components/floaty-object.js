@@ -1,4 +1,3 @@
-/* global AFRAME */
 const COLLISION_LAYERS = require("../constants").COLLISION_LAYERS;
 import { isSynchronized, isMine } from "../../jel/utils/ownership-utils";
 
@@ -27,7 +26,7 @@ AFRAME.registerComponent("floaty-object", {
   init() {
     this.onGrab = this.onGrab.bind(this);
     this.onRelease = this.onRelease.bind(this);
-    this.preGrabCollsionFilterMask = null;
+    this.onReleaseCollisionFilterMask = null;
   },
 
   tick() {
@@ -56,7 +55,11 @@ AFRAME.registerComponent("floaty-object", {
         physicsSystem.getAngularVelocity(uuid) < angularThreshold;
 
       if (isAtRest && objectIsMine) {
-        this.el.setAttribute("body-helper", { type: "kinematic" });
+        // At rest, mask out collisions with the environment for perf
+        let mask = this.el.components["body-helper"].data.collisionFilterMask;
+        mask = mask & ~COLLISION_LAYERS.ENVIRONMENT;
+
+        this.el.setAttribute("body-helper", { type: "kinematic", collisionFilterMask: mask });
       }
 
       if (isAtRest || !objectIsMine) {
@@ -100,23 +103,24 @@ AFRAME.registerComponent("floaty-object", {
           linearDamping: 0.95,
           linearSleepingThreshold: 0.1,
           angularSleepingThreshold: 0.1,
-          collisionFilterMask: this.preGrabCollsionFilterMask
+          collisionFilterMask: this.onReleaseCollisionFilterMask
         });
 
         this._makeStaticWhenAtRest = true;
       } else {
+        // If gravity is going to be activated on release, ensure environment collision is on.
         this.el.setAttribute("body-helper", {
           gravity: { x: 0, y: this.data.releaseGravity, z: 0 },
           angularDamping: 0.01,
           linearDamping: 0.01,
           linearSleepingThreshold: 1.6,
           angularSleepingThreshold: 2.5,
-          collisionFilterMask: this.preGrabCollsionFilterMask
+          collisionFilterMask: this.onReleaseCollisionFilterMask | COLLISION_LAYERS.ENVIRONMENT
         });
       }
     } else {
       this.el.setAttribute("body-helper", {
-        collisionFilterMask: this.preGrabCollsionFilterMask,
+        collisionFilterMask: this.onReleaseCollisionFilterMask | COLLISION_LAYERS.ENVIRONMENT,
         gravity: { x: 0, y: -9.8, z: 0 }
       });
     }
@@ -130,7 +134,7 @@ AFRAME.registerComponent("floaty-object", {
   },
 
   onGrab() {
-    this.preGrabCollsionFilterMask = this.el.components["body-helper"].data.collisionFilterMask;
+    this.onReleaseCollisionFilterMask = this.el.components["body-helper"].data.collisionFilterMask;
 
     this.el.setAttribute("body-helper", {
       gravity: { x: 0, y: 0, z: 0 },

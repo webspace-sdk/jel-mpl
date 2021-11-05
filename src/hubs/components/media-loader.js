@@ -1,7 +1,9 @@
-import { computeObjectAABB, getBox, getScaleCoefficient } from "../utils/auto-box-collider";
+import { getBox, getScaleCoefficient } from "../utils/auto-box-collider";
 import { ensureOwnership, getNetworkedEntity, isSynchronized } from "../../jel/utils/ownership-utils";
 import { ParticleEmitter } from "lib-hubs/packages/three-particle-emitter/lib/esm/index";
 import loadingParticleSrc from "!!url-loader!../../assets/jel/images/loading-particle.png";
+import { VOXLoader } from "../../jel/objects/VOXLoader";
+import { createVox } from "../../hubs/utils/phoenix-utils";
 import {
   resolveUrl,
   getDefaultResolveQuality,
@@ -20,9 +22,11 @@ import {
 } from "../utils/media-url-utils";
 import { addAnimationComponents } from "../utils/animation";
 import qsTruthy from "../utils/qs_truthy";
+import { xyzRangeForSize, shiftForSize, MAX_SIZE as MAX_VOX_SIZE, VoxChunk } from "ot-vox";
+import { voxColorForRGBT } from "ot-vox";
 
 import { SOUND_MEDIA_LOADING, SOUND_MEDIA_LOADED } from "../systems/sound-effects-system";
-import { setMatrixWorld, disposeExistingMesh, disposeNode } from "../utils/three-utils";
+import { disposeExistingMesh, disposeNode } from "../utils/three-utils";
 
 import { SHAPE } from "three-ammo/constants";
 
@@ -47,7 +51,6 @@ AFRAME.registerComponent("media-loader", {
     initialContents: { type: "string" },
     version: { type: "number", default: 1 }, // Used to force a re-resolution
     fitToBox: { default: false },
-    moveTheParentNotTheMesh: { default: false },
     resolve: { default: true },
     contentType: { default: null },
     contentSubtype: { default: null },
@@ -56,11 +59,15 @@ AFRAME.registerComponent("media-loader", {
     skipLoader: { default: false },
     animate: { default: true },
     linkedEl: { default: null }, // This is the element of which this is a linked derivative. See linked-media.js
+    stackAxis: { default: 0 },
+    stackSnapPosition: { default: false },
+    stackSnapScale: { default: false },
     mediaOptions: {
       default: {},
       parse: v => (typeof v === "object" ? v : JSON.parse(v)),
       stringify: JSON.stringify
-    }
+    },
+    locked: { default: false }
   },
 
   init() {
@@ -73,15 +80,18 @@ AFRAME.registerComponent("media-loader", {
     this.animating = false;
     this.cachedShouldShowLoader = null;
 
-    const hubsSystems = this.el.sceneEl.systems["hubs-systems"];
-    hubsSystems.skyBeamSystem.register(this.el.object3D);
+    if (!this.data.locked) {
+      SYSTEMS.skyBeamSystem.register(this.el.object3D);
+    }
+
+    SYSTEMS.undoSystem.register(this.el);
 
     if (isSynchronized(this.el)) {
       getNetworkedEntity(this.el).then(networkedEl => {
         this.networkedEl = networkedEl;
 
         if (typeof this.data.mediaLayer === "number") {
-          hubsSystems.mediaPresenceSystem.updateDesiredMediaPresence(this.el);
+          SYSTEMS.mediaPresenceSystem.updateDesiredMediaPresence(this.el);
         }
       });
     }
@@ -89,47 +99,19 @@ AFRAME.registerComponent("media-loader", {
 
   updateScale: (function() {
     const center = new THREE.Vector3();
-    const originalMeshMatrix = new THREE.Matrix4();
-    const desiredObjectMatrix = new THREE.Matrix4();
-    const position = new THREE.Vector3();
-    const quaternion = new THREE.Quaternion();
-    const scale = new THREE.Vector3();
-    const box = new THREE.Box3();
-    return function(fitToBox, moveTheParentNotTheMesh) {
+    return function(fitToBox) {
       this.el.object3D.updateMatrices();
       const mesh = this.el.getObject3D("mesh");
       if (!mesh) return;
       mesh.updateMatrices();
-      if (moveTheParentNotTheMesh) {
-        if (fitToBox) {
-          console.warn(
-            "Unexpected combination of inputs. Can fit the mesh to a box OR move the parent to the mesh, but did not expect to do both.",
-            this.el
-          );
-        }
-        // Keep the mesh exactly where it is, but move the parent transform such that it aligns with the center of the mesh's bounding box.
-        originalMeshMatrix.copy(mesh.matrixWorld);
-        computeObjectAABB(mesh, box);
-        center.addVectors(box.min, box.max).multiplyScalar(0.5);
-        this.el.object3D.matrixWorld.decompose(position, quaternion, scale);
-        desiredObjectMatrix.compose(
-          center,
-          quaternion,
-          scale
-        );
-        setMatrixWorld(this.el.object3D, desiredObjectMatrix);
-        mesh.updateMatrices();
-        setMatrixWorld(mesh, originalMeshMatrix);
-      } else {
-        // Move the mesh such that the center of its bounding box is in the same position as the parent matrix position
-        const box = getBox(this.el, mesh);
-        const scaleCoefficient = fitToBox ? getScaleCoefficient(0.5, box) : 1;
-        const { min, max } = box;
-        center.addVectors(min, max).multiplyScalar(0.5 * scaleCoefficient);
-        mesh.scale.multiplyScalar(scaleCoefficient);
-        mesh.position.sub(center);
-        mesh.matrixNeedsUpdate = true;
-      }
+      // Move the mesh such that the center of its bounding box is in the same position as the parent matrix position
+      const box = getBox(this.el, mesh);
+      const scaleCoefficient = fitToBox ? getScaleCoefficient(0.5, box) : 1;
+      const { min, max } = box;
+      center.addVectors(min, max).multiplyScalar(0.5 * scaleCoefficient);
+      mesh.scale.multiplyScalar(scaleCoefficient);
+      mesh.position.sub(center);
+      mesh.matrixNeedsUpdate = true;
     };
   })(),
 
@@ -160,10 +142,14 @@ AFRAME.registerComponent("media-loader", {
       this.data.linkedEl.removeEventListener("componentremoved", this.handleLinkedElRemoved);
     }
 
-    const hubsSystems = this.el.sceneEl.systems["hubs-systems"];
-    hubsSystems.skyBeamSystem.unregister(this.el.object3D);
+    SYSTEMS.skyBeamSystem.unregister(this.el.object3D);
+    SYSTEMS.undoSystem.unregister(this.el);
 
-    const sfx = hubsSystems.soundEffectsSystem;
+    if (SYSTEMS.cameraSystem.inspected === this.el.object3D) {
+      SYSTEMS.cameraSystem.uninspect();
+    }
+
+    const sfx = SYSTEMS.soundEffectsSystem;
 
     if (this.loadingSoundEffect) {
       sfx.stopPositionalAudio(this.loadingSoundEffect);
@@ -232,6 +218,8 @@ AFRAME.registerComponent("media-loader", {
     this.loaderParticles.scale.y = 0.35;
     this.loaderParticles.rotation.set(-Math.PI / 2, 0, 0);
     this.loaderParticles.matrixNeedsUpdate = true;
+    this.loaderParticles.userData.excludeFromBoundingBox = true;
+
     this.el.setObject3D("loader-particles", this.loaderParticles);
 
     this.updateScale(true, false);
@@ -335,7 +323,7 @@ AFRAME.registerComponent("media-loader", {
     if (this.shouldShowLoader() && this.data.animate) {
       if (!this.animating) {
         this.animating = true;
-        if (shouldUpdateScale) this.updateScale(this.data.fitToBox, this.data.moveTheParentNotTheMesh);
+        if (shouldUpdateScale) this.updateScale(this.data.fitToBox);
         const mesh = this.el.getObject3D("mesh");
 
         if (mesh) {
@@ -347,7 +335,7 @@ AFRAME.registerComponent("media-loader", {
         }
       }
     } else {
-      if (shouldUpdateScale) this.updateScale(this.data.fitToBox, this.data.moveTheParentNotTheMesh);
+      if (shouldUpdateScale) this.updateScale(this.data.fitToBox);
       finish();
     }
   },
@@ -362,12 +350,24 @@ AFRAME.registerComponent("media-loader", {
   },
 
   async update(oldData, forceLocalRefresh) {
-    const { src, version, contentSubtype } = this.data;
+    const { src, version, contentSubtype, locked } = this.data;
     if (!src) return;
 
-    const mediaChanged = oldData.src !== src;
+    const mediaSrcChanged = oldData.src !== src && !!oldData.src;
     const versionChanged = !!(oldData.version && oldData.version !== version);
-    if (!mediaChanged && !versionChanged && !forceLocalRefresh) return;
+    const lockedChanged = oldData.locked !== undefined && oldData.locked !== locked;
+
+    if (lockedChanged) {
+      if (this.data.locked) {
+        SYSTEMS.skyBeamSystem.unregister(this.el.object3D);
+      } else {
+        SYSTEMS.skyBeamSystem.register(this.el.object3D);
+      }
+
+      this.el.emit("media_locked_changed");
+    }
+
+    if (oldData.src && !mediaSrcChanged && !versionChanged && !forceLocalRefresh) return;
 
     if (versionChanged) {
       this.el.emit("media_refreshing");
@@ -378,7 +378,7 @@ AFRAME.registerComponent("media-loader", {
     }
 
     try {
-      if ((forceLocalRefresh || mediaChanged) && !this.showLoaderTimeout && this.shouldShowLoader()) {
+      if ((forceLocalRefresh || oldData.src !== src) && !this.showLoaderTimeout && this.shouldShowLoader()) {
         // Delay loader so we don't do it if media is locally cached, etc.
         this.showLoaderTimeout = setTimeout(this.showLoader, 100);
       }
@@ -439,11 +439,18 @@ AFRAME.registerComponent("media-loader", {
         contentType = "application/vnd.apple.mpegurl";
       }
 
-      // Clear loader, if any.
-      disposeExistingMesh(this.el);
+      if (!mediaSrcChanged) {
+        // Clear loader, if any.
+        disposeExistingMesh(this.el);
+      }
+
+      if (mediaSrcChanged) {
+        // Don't animate when changing src
+        this.data.animate = false;
+      }
 
       // We don't want to emit media_resolved for index updates.
-      if (forceLocalRefresh || mediaChanged) {
+      if (forceLocalRefresh || mediaSrcChanged) {
         this.el.emit("media_resolved", { src, raw: accessibleUrl, contentType });
       } else {
         this.el.emit("media_refreshed", { src, raw: accessibleUrl, contentType });
@@ -471,11 +478,11 @@ AFRAME.registerComponent("media-loader", {
           properties.font = mediaOptions.font;
         }
 
-        this.setToSingletonMediaComponent("media-text", properties);
+        this.setToSingletonMediaComponent("media-text", properties, mediaSrcChanged);
       } else if (src.startsWith("jel://entities/") && src.includes("/components/media-emoji")) {
         this.el.addEventListener("model-loaded", () => this.onMediaLoaded(SHAPE.BOX), { once: true });
 
-        this.setToSingletonMediaComponent("media-emoji", { src: accessibleUrl });
+        this.setToSingletonMediaComponent("media-emoji", { src: accessibleUrl }, mediaSrcChanged);
       } else if (contentType === "video/vnd.jel-bridge") {
         this.el.setAttribute("floaty-object", {
           autoLockOnRelease: true, // Needed so object becomes kinematic on release for repositioning
@@ -495,7 +502,7 @@ AFRAME.registerComponent("media-loader", {
           contentType
         });
 
-        this.setToSingletonMediaComponent("media-canvas", canvasAttributes);
+        this.setToSingletonMediaComponent("media-canvas", canvasAttributes, mediaSrcChanged);
 
         // These behaviors cause the video bridge to follow the avatar.
         this.el.setAttribute("pinned-to-self", {});
@@ -548,7 +555,7 @@ AFRAME.registerComponent("media-loader", {
           videoAttributes.time = startTime;
         }
 
-        this.setToSingletonMediaComponent("media-video", videoAttributes);
+        this.setToSingletonMediaComponent("media-video", videoAttributes, mediaSrcChanged);
 
         // Add the media-stream component to any entity that is streaming this client's video stream.
         if (contentType === "video/vnd.jel-webrtc" && src.indexOf(NAF.clientId)) {
@@ -581,7 +588,8 @@ AFRAME.registerComponent("media-loader", {
             version,
             contentType,
             batch
-          })
+          }),
+          mediaSrcChanged
         );
       } else if (contentType.startsWith("application/pdf")) {
         this.setToSingletonMediaComponent(
@@ -590,9 +598,14 @@ AFRAME.registerComponent("media-loader", {
             src: accessibleUrl,
             contentType,
             batch: false // Batching disabled until atlas is updated properly
-          })
+          }),
+          mediaSrcChanged
         );
-        this.el.setAttribute("media-pager", {});
+
+        if (this.data.mediaOptions.pagable !== false) {
+          this.el.setAttribute("media-pager", {});
+        }
+
         this.el.setAttribute("floaty-object", { reduceAngularFloat: true, releaseGravity: -1 });
         this.el.addEventListener(
           "pdf-loaded",
@@ -627,10 +640,11 @@ AFRAME.registerComponent("media-loader", {
             src: accessibleUrl,
             contentType: contentType,
             inflate: true,
-            toon: true,
+            toon: false,
             batch,
             modelToWorldScale: this.data.fitToBox ? 0.0001 : 1.0
-          })
+          }),
+          mediaSrcChanged
         );
       } else if (contentType.startsWith("model/vnd.jel-vox")) {
         this.el.addEventListener("model-loaded", () => this.onMediaLoaded(null, false), { once: true });
@@ -640,7 +654,8 @@ AFRAME.registerComponent("media-loader", {
           "media-vox",
           Object.assign({}, this.data.mediaOptions, {
             src: accessibleUrl
-          })
+          }),
+          mediaSrcChanged
         );
       } else if (contentType.startsWith("text/html")) {
         this.el.addEventListener(
@@ -677,7 +692,22 @@ AFRAME.registerComponent("media-loader", {
             version,
             contentType: guessContentType(thumbnail) || "image/png",
             batch
-          })
+          }),
+          mediaSrcChanged
+        );
+      } else if (contentType.startsWith("model/vox-binary")) {
+        const voxSrc = await this.importVoxFromUrl(canonicalUrl);
+
+        this.el.setAttribute("media-loader", { src: voxSrc, resolve: false, contentType: "model/vnd.jel-vox" });
+        this.el.addEventListener("model-loaded", () => this.onMediaLoaded(null, false), { once: true });
+        this.el.addEventListener("model-error", this.onError, { once: true });
+        this.el.setAttribute("floaty-object", { gravitySpeedLimit: 1.85 });
+        this.setToSingletonMediaComponent(
+          "media-vox",
+          Object.assign({}, this.data.mediaOptions, {
+            src: voxSrc
+          }),
+          mediaSrcChanged
         );
       } else {
         throw new Error(`Unsupported content type: ${contentType}`);
@@ -690,9 +720,9 @@ AFRAME.registerComponent("media-loader", {
     }
   },
 
-  setToSingletonMediaComponent(attr, properties) {
+  setToSingletonMediaComponent(attr, properties, removeExisting = false) {
     for (const component of MEDIA_VIEW_COMPONENTS) {
-      if (attr === component) continue;
+      if (component === attr && !removeExisting) continue;
       this.el.removeAttribute(component);
     }
 
@@ -721,6 +751,76 @@ AFRAME.registerComponent("media-loader", {
     this.data.initialContents = null;
 
     return contents;
+  },
+
+  async importVoxFromUrl(importUrl) {
+    const spaceId = window.APP.spaceChannel.spaceId;
+    const { voxSystem } = SYSTEMS;
+
+    const {
+      vox: [{ vox_id: voxId, url }]
+    } = await createVox(spaceId);
+
+    const sync = await voxSystem.getSync(voxId);
+
+    // A VOX being loaded should be imported and then the src changed to the appropriate URL.
+    await new Promise(res => {
+      new VOXLoader().load(importUrl, async voxFileChunks => {
+        for (let frame = 0; frame < voxFileChunks.length; frame++) {
+          if (frame > 0) continue; // TODO multiple frames. Breaks physics, etc.
+          const { palette, data } = voxFileChunks[frame];
+
+          let vsx = 0;
+          let vsy = 0;
+          let vsz = 0;
+
+          for (let i = 0; i < data.length; i += 4) {
+            vsx = Math.max(data[i + 0] + 1, vsx);
+            vsz = Math.max(data[i + 1] + 1, vsz);
+            vsy = Math.max(data[i + 2] + 1, vsy);
+          }
+
+          const size = [Math.min(vsx, MAX_VOX_SIZE), Math.min(vsy, MAX_VOX_SIZE), Math.min(vsz, MAX_VOX_SIZE)];
+          const iPalToVoxColor = i => {
+            const rgba = palette[i];
+            const r = 0x000000ff & rgba;
+            const g = (0x0000ff00 & rgba) >>> 8;
+            const b = (0x00ff0000 & rgba) >>> 16;
+            return voxColorForRGBT(r, g, b);
+          };
+          const [minX, maxX, minY, maxY, minZ, maxZ] = xyzRangeForSize(size);
+
+          const shiftX = shiftForSize(size[0]);
+          const shiftY = shiftForSize(size[1]);
+          const shiftZ = shiftForSize(size[2]);
+
+          const voxChunk = new VoxChunk(size);
+
+          for (let i = 0; i < data.length; i += 4) {
+            const x = data[i + 0];
+            const z = data[i + 1];
+            const y = data[i + 2];
+            const c = data[i + 3];
+
+            const voxX = x - shiftX;
+            const voxY = y - shiftY;
+            let voxZ = z - shiftZ;
+            // ?? not sure why this is needed but objects come in mirrored
+            voxZ = voxZ == 0 ? 0 : voxZ < 0 ? -voxZ : -voxZ + 1;
+
+            if (voxX >= minX && voxX <= maxX && voxY >= minY && voxY <= maxY && voxZ >= minZ && voxZ <= maxZ) {
+              const voxColor = iPalToVoxColor(c);
+              voxChunk.setColorAt(voxX, voxY, voxZ, voxColor);
+            }
+          }
+
+          await sync.applyChunk(voxChunk, frame, [0, 0, 0]);
+          res();
+        }
+      });
+    });
+
+    return url;
   }
 });
 

@@ -4,6 +4,11 @@ import { hackyMobileSafariTest } from "./utils/detect-touchscreen";
 import { ensureOwnership } from "./../jel/utils/ownership-utils";
 import { MEDIA_TEXT_COLOR_PRESETS } from "../jel/components/media-text";
 import { waitForDOMContentLoaded } from "./utils/async-utils";
+import { createVox } from "./utils/phoenix-utils";
+import WorldExporter from "../jel/utils/world-exporter";
+import { switchCurrentHubToWorldTemplate } from "../jel/utils/template-utils";
+import { screenshotAndUploadSceneCanvas } from "./utils/three-utils";
+import { retainPdf, releasePdf } from "../jel/utils/pdf-pool";
 
 const { detect } = require("detect-browser");
 
@@ -14,7 +19,13 @@ const isMobileVR = AFRAME.utils.device.isMobileVR();
 const isDebug = qsTruthy("debug");
 const qs = new URLSearchParams(location.search);
 
-import { spawnMediaInfrontOfPlayer, performAnimatedRemove } from "./utils/media-utils";
+import {
+  spawnMediaInfrontOfPlayer,
+  performAnimatedRemove,
+  snapEntityToBiggestNearbyScreen,
+  addAndArrangeRoundtableMedia,
+  upload
+} from "./utils/media-utils";
 import {
   isIn2DInterstitial,
   handleExitTo2DInterstitial,
@@ -24,6 +35,7 @@ import {
 import { ObjectContentOrigins } from "./object-types";
 import { getAvatarSrc, getAvatarType } from "./utils/avatar-utils";
 import { pushHistoryState } from "./utils/history";
+import { proxiedUrlFor } from "./utils/media-url-utils";
 
 const isIOS = AFRAME.utils.device.isIOS();
 
@@ -204,8 +216,73 @@ export default class SceneEntryManager {
       spawnMediaInfrontOfPlayer(null, "", null, e.detail, { backgroundColor, foregroundColor });
     });
 
+    this.scene.addEventListener("add_media_vox", async () => {
+      const spaceId = window.APP.spaceChannel.spaceId;
+      const hubId = window.APP.hubChannel.hubId;
+      const { voxSystem, builderSystem } = SYSTEMS;
+
+      const {
+        vox: [{ vox_id: voxId }]
+      } = await createVox(spaceId, hubId);
+
+      const sync = await voxSystem.getSync(voxId);
+      await sync.setVoxel(0, 0, 0, builderSystem.brushVoxColor);
+      await voxSystem.spawnVoxInFrontOfPlayer(voxId);
+    });
+
     this.scene.addEventListener("add_media_emoji", ({ detail: emoji }) => {
       spawnMediaInfrontOfPlayer(null, emoji);
+    });
+
+    this.scene.addEventListener("add_media_exploded_pdf", async e => {
+      let pdfUrl;
+
+      const fileOrUrl = e.detail.fileOrUrl;
+      const startPhi = e.detail.startPhi || -Math.PI;
+      const endPhi = e.detail.endPhi || Math.PI;
+      const width = e.detail.width || 3;
+      const margin = e.detail.margin || 0.75;
+
+      // This is going to generate an array of media, get the URL first.
+      if (fileOrUrl instanceof File) {
+        if (!window.APP.hubChannel.can("upload_files")) return;
+
+        const {
+          origin,
+          meta: { access_token }
+        } = await upload(fileOrUrl, "application/pdf", window.APP.hubChannel.hubId);
+
+        const url = new URL(proxiedUrlFor(origin));
+        url.searchParams.set("token", access_token);
+        pdfUrl = url.ref;
+      } else {
+        pdfUrl = fileOrUrl;
+      }
+
+      const pdf = await retainPdf(proxiedUrlFor(pdfUrl));
+      const numPages = pdf.numPages;
+
+      const centerMatrixWorld = new THREE.Matrix4();
+      const avatarPov = document.querySelector("#avatar-pov-node");
+      avatarPov.object3D.updateMatrices();
+      centerMatrixWorld.copy(avatarPov.object3D.matrixWorld);
+
+      for (let i = 0; i < numPages; i++) {
+        addAndArrangeRoundtableMedia(
+          centerMatrixWorld,
+          pdfUrl,
+          width,
+          margin,
+          numPages,
+          i,
+          { index: i, pagable: false },
+          true,
+          startPhi,
+          endPhi
+        );
+      }
+
+      releasePdf(pdf);
     });
 
     this.scene.addEventListener("object_spawned", e => {
@@ -240,9 +317,34 @@ export default class SceneEntryManager {
 
     this.scene.addEventListener("action_vr_notice_closed", () => forceExitFrom2DInterstitial());
 
+    this.scene.addEventListener("action_publish_template", ({ detail: { collection } }) => {
+      new WorldExporter().currentWorldToHtml().then(async body => {
+        const { hubChannel, hubMetadata } = window.APP;
+        const { hubId } = hubChannel;
+
+        const { name } = await hubMetadata.getOrFetchMetadata(hubId);
+        const { file_id: thumbFileId } = await screenshotAndUploadSceneCanvas(this.scene, 256, 256);
+
+        hubChannel.publishWorldTemplate(name, collection, body, thumbFileId);
+      });
+    });
+
+    this.scene.addEventListener("action_switch_template", ({ detail: { worldTemplateId } }) => {
+      switchCurrentHubToWorldTemplate(worldTemplateId);
+    });
+
     document.addEventListener("paste", e => AFRAME.scenes[0].systems["hubs-systems"].pasteSystem.enqueuePaste(e));
 
     document.addEventListener("dragover", e => e.preventDefault());
+
+    this.scene.addEventListener("dragenter", e => {
+      const { types } = e.dataTransfer;
+      const transformSystem = this.scene.systems["transform-selected-object"];
+
+      if (types.length === 1 && types[0] === "jel/vox" && !transformSystem.transforming) {
+        SYSTEMS.voxSystem.beginPlacingDraggedVox();
+      }
+    });
 
     document.addEventListener("drop", e => {
       e.preventDefault();
@@ -291,9 +393,9 @@ export default class SceneEntryManager {
       const browser = detect();
 
       if (browser.name === "chrome") {
-        // HACK Chrome will move focus to the screen share nag so disable
-        // the blur handler one time.
-        window.APP.disableBlurHandlerOnceIfVisible = true;
+        // HACK Chrome will move focus to the screen share nag so pause immediately
+        // to ensure user clicks back in.
+        window.APP.pauseImmediatelyOnNextBlur = true;
       }
 
       const videoTracks = newStream ? newStream.getVideoTracks() : [];
@@ -332,7 +434,16 @@ export default class SceneEntryManager {
           audioSystem.addStreamToOutboundAudio("screenshare", newStream);
         }
 
-        spawnMediaInfrontOfPlayer(mediaStreamSystem.mediaStream);
+        const entity = spawnMediaInfrontOfPlayer(mediaStreamSystem.mediaStream);
+
+        // Snap screen share to screen
+        entity.addEventListener(
+          "media-loaded",
+          () => {
+            snapEntityToBiggestNearbyScreen(entity);
+          },
+          { once: true }
+        );
       }
 
       this.scene.addState("sharing_video");

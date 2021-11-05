@@ -47,6 +47,7 @@ import { PasteSystem } from "../../hubs/systems/paste-system";
 import { ExternalCameraSystem } from "../../jel/systems/external-camera-system";
 import { VideoBridgeSystem } from "../../jel/systems/video-bridge-system";
 import { DirectorSystem } from "../../jel/systems/director-system";
+import { UndoSystem } from "../../jel/systems/undo-system";
 
 AFRAME.registerSystem("hubs-systems", {
   init() {
@@ -56,16 +57,16 @@ AFRAME.registerSystem("hubs-systems", {
     this.cursorTogglingSystem = new CursorTogglingSystem();
     this.interactionSfxSystem = new InteractionSfxSystem();
     this.superSpawnerSystem = new SuperSpawnerSystem();
-    this.cursorTargettingSystem = new CursorTargettingSystem();
+    this.cursorTargettingSystem = new CursorTargettingSystem(this.el);
     this.positionAtBorderSystem = new PositionAtBorderSystem();
     this.cameraSystem = new CameraSystem(this.el);
-    this.audioSystem = new AudioSystem(this.el);
+    this.autoQualitySystem = new AutoQualitySystem(this.el);
+    this.audioSystem = new AudioSystem(this.el, this.autoQualitySystem);
     this.soundEffectsSystem = new SoundEffectsSystem(this.el);
     this.atmosphereSystem = new AtmosphereSystem(this.el, this.soundEffectsSystem);
-    this.skyBeamSystem = new SkyBeamSystem(this.el);
     this.voxmojiSystem = new VoxmojiSystem(this.el, this.atmosphereSystem);
     this.physicsSystem = new PhysicsSystem(this.el.object3D, this.atmosphereSystem);
-    this.voxSystem = new VoxSystem(this.el, this.cursorTargettingSystem, this.physicsSystem);
+    this.voxSystem = new VoxSystem(this.el, this.cursorTargettingSystem, this.physicsSystem, this.cameraSystem);
     this.constraintsSystem = new ConstraintsSystem(this.physicsSystem);
     this.twoPointStretchingSystem = new TwoPointStretchingSystem();
     this.singleActionButtonSystem = new SingleActionButtonSystem();
@@ -81,12 +82,19 @@ AFRAME.registerSystem("hubs-systems", {
     this.scaleInScreenSpaceSystem = new ScaleInScreenSpaceSystem();
     this.audioSettingsSystem = new AudioSettingsSystem(this.el);
     this.enterVRButtonSystem = new EnterVRButtonSystem(this.el);
-    this.mediaInteractionSystem = new MediaInteractionSystem(this.el);
+    this.mediaInteractionSystem = new MediaInteractionSystem(this.el, this.soundEffectsSystem);
     this.animationMixerSystem = new AnimationMixerSystem();
     this.boneVisibilitySystem = new BoneVisibilitySystem();
     this.uvScrollSystem = new UVScrollSystem();
     this.mediaStreamSystem = new MediaStreamSystem(this.el);
-    this.wrappedEntitySystem = new WrappedEntitySystem(this.el, this.atmosphereSystem, this.skyBeamSystem);
+    this.terrainSystem = new TerrainSystem(this.el, this.atmosphereSystem, this.cameraSystem);
+    this.skyBeamSystem = new SkyBeamSystem(this.el, this.terrainSystem);
+    this.wrappedEntitySystem = new WrappedEntitySystem(
+      this.el,
+      this.atmosphereSystem,
+      this.skyBeamSystem,
+      this.terrainSystem
+    );
     this.projectileSystem = new ProjectileSystem(
       this.el,
       this.voxmojiSystem,
@@ -94,14 +102,18 @@ AFRAME.registerSystem("hubs-systems", {
       this.wrappedEntitySystem,
       this.soundEffectsSystem
     );
-    this.terrainSystem = new TerrainSystem(this.el, this.atmosphereSystem);
-    this.characterController = new CharacterControllerSystem(this.el, this.terrainSystem);
-    this.mediaPresenceSystem = new MediaPresenceSystem(this.el, this.characterController);
+    this.builderSystem = new BuilderSystem(
+      this.el,
+      this.el.systems.userinput,
+      this.soundEffectsSystem,
+      this.cursorTargettingSystem
+    );
+    this.characterController = new CharacterControllerSystem(this.el, this.terrainSystem, this.builderSystem);
+    this.mediaPresenceSystem = new MediaPresenceSystem(this.el, this.characterController, this.terrainSystem);
     this.uiAnimationSystem = new UIAnimationSystem(this.el, this.atmosphereSystem);
     this.avatarSystem = new AvatarSystem(this.el, this.atmosphereSystem);
     this.cameraRotatorSystem = new CameraRotatorSystem(this.el);
     this.keyboardTipSystem = new KeyboardTipSystem(this.el, this.cameraSystem);
-    this.autoQualitySystem = new AutoQualitySystem(this.el);
     this.helpersSystem = new HelpersSystem(this.el);
     this.launcherSystem = new LauncherSystem(
       this.el,
@@ -109,12 +121,6 @@ AFRAME.registerSystem("hubs-systems", {
       this.el.systems.userinput,
       this.characterController,
       this.soundEffectsSystem
-    );
-    this.builderSystem = new BuilderSystem(
-      this.el,
-      this.el.systems.userinput,
-      this.soundEffectsSystem,
-      this.cursorTargettingSystem
     );
     this.pasteSystem = new PasteSystem(this.el);
     this.externalCameraSystem = new ExternalCameraSystem(
@@ -132,6 +138,7 @@ AFRAME.registerSystem("hubs-systems", {
       this.autoQualitySystem
     );
     this.directorSystem = new DirectorSystem();
+    this.undoSystem = new UndoSystem();
 
     window.SYSTEMS = this;
   },
@@ -154,6 +161,7 @@ AFRAME.registerSystem("hubs-systems", {
     this.superSpawnerSystem.tick();
     this.cursorPoseTrackingSystem.tick();
     this.voxSystem.tick(t, dt); // Vox system may generate targetting meshes
+    this.cameraSystem.tick(this.el, dt); // May update targets if inspecting
     this.cursorTargettingSystem.tick(t);
     this.positionAtBorderSystem.tick();
     this.scaleInScreenSpaceSystem.tick();
@@ -173,7 +181,6 @@ AFRAME.registerSystem("hubs-systems", {
     this.scenePreviewCameraSystem.tick();
     this.physicsSystem.tick(dt);
     this.batchManagerSystem.tick(t);
-    this.cameraSystem.tick(this.el, dt);
     this.spriteSystem.tick(t, dt);
     this.enterVRButtonSystem.tick();
     this.uvScrollSystem.tick(dt);
@@ -193,13 +200,14 @@ AFRAME.registerSystem("hubs-systems", {
     this.builderSystem.tick(t, dt);
     this.videoBridgeSystem.tick();
     this.directorSystem.tick(t, dt);
+    this.undoSystem.tick(t, dt);
 
     // We run this late in the frame so that its the last thing to have an opinion about the scale of an object
     this.boneVisibilitySystem.tick();
   },
 
-  tock(t) {
-    this.externalCameraSystem.tock(t);
+  tock(t, dt) {
+    this.externalCameraSystem.tock(t, dt);
   },
 
   remove() {

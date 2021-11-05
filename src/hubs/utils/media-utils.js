@@ -5,10 +5,13 @@ import mediaHighlightFrag from "./media-highlight-frag.glsl";
 import { mapMaterials } from "./material-utils";
 import HubsTextureLoader from "../loaders/HubsTextureLoader";
 import { validMaterials } from "../components/hoverable-visuals";
+import { offsetRelativeTo } from "../components/offset-relative-to";
 import { proxiedUrlFor, guessContentType } from "../utils/media-url-utils";
 import { getNetworkedEntity, getNetworkId, ensureOwnership, isSynchronized } from "../../jel/utils/ownership-utils";
 import { addVertexCurvingToShader } from "../../jel/systems/terrain-system";
 import { SOUND_MEDIA_REMOVED } from "../systems/sound-effects-system";
+import { expandByEntityObjectSpaceBoundingBox } from "./three-utils";
+import { stackTargetAt, NON_FLAT_STACK_AXES } from "../systems/transform-selected-object";
 import anime from "animejs";
 
 // We use the legacy 'text' regex since it matches some items like beach_umbrella
@@ -33,8 +36,25 @@ export const MEDIA_INTERACTION_TYPES = {
   REMOVE: 9,
   CLONE: 10,
   EDIT: 11,
-  OPEN: 12
+  OPEN: 12,
+  SLIDE: 13,
+  LIFT: 14,
+  STACK: 15,
+  TOGGLE_LOCK: 16,
+  RESET: 17
 };
+
+export const LOCKED_MEDIA_DISALLOWED_INTERACTIONS = [
+  MEDIA_INTERACTION_TYPES.ROTATE,
+  MEDIA_INTERACTION_TYPES.SCALE,
+  MEDIA_INTERACTION_TYPES.TRANSFORM_RELEASE,
+  MEDIA_INTERACTION_TYPES.REMOVE,
+  MEDIA_INTERACTION_TYPES.EDIT,
+  MEDIA_INTERACTION_TYPES.SLIDE,
+  MEDIA_INTERACTION_TYPES.LIFT,
+  MEDIA_INTERACTION_TYPES.STACK,
+  MEDIA_INTERACTION_TYPES.RESET
+];
 
 export const LOADING_EVENTS = ["model-loading", "image-loading", "text-loading", "pdf-loading"];
 export const LOADED_EVENTS = ["model-loaded", "image-loaded", "text-loaded", "pdf-loaded"];
@@ -51,9 +71,19 @@ export const MEDIA_VIEW_COMPONENTS = [
 ];
 
 export const PAGABLE_MEDIA_VIEW_COMPONENTS = ["media-video", "media-pdf"];
-export const BAKABLE_MEDIA_VIEW_COMPONENTS = ["media-video", "media-text", "media-pdf", "media-canvas"];
+// Components supporting Q/E next and prev interactions
+export const NEXT_PREV_MEDIA_VIEW_COMPONENTS = ["media-video", "media-pdf", "media-text", "media-video"];
+export const BAKABLE_MEDIA_VIEW_COMPONENTS = ["media-video", "media-text", "media-pdf", "media-canvas", "media-vox"];
+export const FLAT_MEDIA_VIEW_COMPONENTS = [
+  "media-video",
+  "media-text",
+  "media-pdf",
+  "media-canvas",
+  "media-image",
+  "media-emoji"
+];
 
-export const GROUNDABLE_MEDIA_VIEW_COMPONENTS = [
+export const RESETABLE_MEDIA_VIEW_COMPONENTS = [
   "gltf-model-plus",
   "media-vox",
   "media-image",
@@ -65,6 +95,14 @@ export const ORBIT_ON_INSPECT_MEDIA_VIEW_COMPONENTS = ["gltf-model-plus", "media
 
 export const shouldOrbitOnInspect = function(obj) {
   for (const component of ORBIT_ON_INSPECT_MEDIA_VIEW_COMPONENTS) {
+    if (obj.el.components[component]) return true;
+  }
+
+  return false;
+};
+
+export const isFlatMedia = function(obj) {
+  for (const component of FLAT_MEDIA_VIEW_COMPONENTS) {
     if (obj.el.components[component]) return true;
   }
 
@@ -114,9 +152,9 @@ export const resolveUrl = async (url, quality = null, version = 1, bustCache) =>
   return resultPromise;
 };
 
-export const upload = (file, desiredContentType, hubId) => {
+export const upload = (fileOrBlob, desiredContentType, hubId) => {
   const formData = new FormData();
-  formData.append("media", file);
+  formData.append("media", fileOrBlob);
 
   if (hubId) {
     formData.append("hub_id", hubId);
@@ -219,7 +257,11 @@ export const addMedia = (
   linkedEl = null,
   networkId = null,
   skipLoader = false,
-  contentType = null
+  contentType = null,
+  locked = false,
+  stackAxis = 0,
+  stackSnapPosition = false,
+  stackSnapScale = false
 ) => {
   const scene = AFRAME.scenes[0];
 
@@ -248,6 +290,7 @@ export const addMedia = (
   }
 
   const needsToBeUploaded = src instanceof File;
+
   // TODO JEL deal with text files dropped or uploaded
 
   // If we're re-pasting an existing src in the scene, we should use the latest version
@@ -283,7 +326,11 @@ export const addMedia = (
     linkedEl,
     mediaLayer,
     mediaOptions,
-    contentType
+    contentType,
+    locked,
+    stackAxis,
+    stackSnapPosition,
+    stackSnapScale
   });
 
   if (contents && !isEmoji) {
@@ -342,8 +389,8 @@ export const addMedia = (
   return { entity, orientation };
 };
 
-// Animates the given object to the terrain ground.
-export const groundMedia = (sourceEl, faceUp, bbox = null, meshOffset = 0.0) => {
+// Moves the given object to the terrain ground.
+export const groundMedia = (sourceEl, faceUp, bbox = null, meshOffset = 0.0, animate = true, positionOnly = false) => {
   const { object3D } = sourceEl;
   const finalXRotation = faceUp ? (3.0 * Math.PI) / 2.0 : 0.0;
   const px = object3D.rotation.x;
@@ -372,14 +419,74 @@ export const groundMedia = (sourceEl, faceUp, bbox = null, meshOffset = 0.0) => 
   const terrainHeight = terrainSystem.getTerrainHeightAtWorldCoord(x, z);
   const finalYPosition = objectHeight * 0.5 + meshOffset + terrainHeight;
 
+  const floatyObject = sourceEl.components["floaty-object"];
+
+  if (floatyObject) {
+    // If physics body was dynamic, lock it so physics system won't be updating it anymore.
+    floatyObject.setLocked(true);
+  }
+
+  if (animate) {
+    const step = (function() {
+      const lastValue = {};
+      return function(anim) {
+        const value = anim.animatables[0].target;
+
+        // For animation timeline.
+        if (value.x === lastValue.x && value.y === lastValue.y && value.z === lastValue.z) {
+          return;
+        }
+
+        lastValue.x = value.x;
+        lastValue.y = value.y;
+        lastValue.z = value.z;
+
+        object3D.rotation.x = value.x;
+        object3D.position.y = value.y;
+        object3D.rotation.z = value.z;
+        object3D.matrixNeedsUpdate = true;
+      };
+    })();
+
+    anime({
+      duration: 800,
+      easing: "easeOutElastic",
+      elasticity: 800,
+      loop: 0,
+      round: false,
+      x: positionOnly ? object3D.rotation.x : finalXRotation,
+      y: finalYPosition,
+      z: positionOnly ? object3D.rotation.z : 0.0,
+      targets: [{ x: object3D.rotation.x, y: object3D.position.y, z: object3D.rotation.z }],
+      update: anim => step(anim),
+      complete: anim => step(anim)
+    });
+  } else {
+    if (!positionOnly) {
+      object3D.rotation.x = finalXRotation;
+      object3D.rotation.z = 0.0;
+    }
+
+    object3D.position.y = finalYPosition;
+    object3D.matrixNeedsUpdate = true;
+  }
+};
+
+// Resets the transform rotation of the media
+export const resetMediaRotation = sourceEl => {
+  const { object3D } = sourceEl;
+
+  const floatyObject = sourceEl.components["floaty-object"];
+
+  if (floatyObject) {
+    // If physics body was dynamic, lock it so physics system won't be updating it anymore.
+    floatyObject.setLocked(true);
+  }
+
   const step = (function() {
     const lastValue = {};
     return function(anim) {
       const value = anim.animatables[0].target;
-
-      value.x = Math.max(Number.MIN_VALUE, value.x);
-      value.y = Math.max(Number.MIN_VALUE, value.y);
-      value.z = Math.max(Number.MIN_VALUE, value.z);
 
       // For animation timeline.
       if (value.x === lastValue.x && value.y === lastValue.y && value.z === lastValue.z) {
@@ -391,7 +498,7 @@ export const groundMedia = (sourceEl, faceUp, bbox = null, meshOffset = 0.0) => 
       lastValue.z = value.z;
 
       object3D.rotation.x = value.x;
-      object3D.position.y = value.y;
+      object3D.rotation.y = value.y;
       object3D.rotation.z = value.z;
       object3D.matrixNeedsUpdate = true;
     };
@@ -403,16 +510,24 @@ export const groundMedia = (sourceEl, faceUp, bbox = null, meshOffset = 0.0) => 
     elasticity: 800,
     loop: 0,
     round: false,
-    x: finalXRotation,
-    y: finalYPosition,
+    x: 0.0,
+    y: 0.0,
     z: 0.0,
-    targets: [{ x: object3D.rotation.x, y: object3D.position.y, z: object3D.rotation.z }],
+    targets: [{ x: object3D.rotation.x, y: object3D.rotation.y, z: object3D.rotation.z }],
     update: anim => step(anim),
     complete: anim => step(anim)
   });
 };
 
-export const cloneMedia = (sourceEl, template, src = null, networked = true, link = false, parentEl = null) => {
+export const cloneMedia = (
+  sourceEl,
+  template,
+  src = null,
+  networked = true,
+  link = false,
+  parentEl = null,
+  animate = true
+) => {
   let contents = null;
   const extraMediaOptions = {};
 
@@ -433,7 +548,15 @@ export const cloneMedia = (sourceEl, template, src = null, networked = true, lin
     }
   }
 
-  const { contentType, contentSubtype, fitToBox, mediaOptions } = sourceEl.components["media-loader"].data;
+  const {
+    contentType,
+    contentSubtype,
+    fitToBox,
+    mediaOptions,
+    stackAxis,
+    stackSnapPosition,
+    stackSnapScale
+  } = sourceEl.components["media-loader"].data;
 
   return addMedia(
     src,
@@ -443,14 +566,18 @@ export const cloneMedia = (sourceEl, template, src = null, networked = true, lin
     contentSubtype,
     true,
     fitToBox,
-    true,
+    animate,
     { ...mediaOptions, ...extraMediaOptions },
     networked,
     parentEl,
     link ? sourceEl : null,
     null,
     false,
-    contentType
+    contentType,
+    false,
+    stackAxis,
+    stackSnapPosition,
+    stackSnapScale
   );
 };
 
@@ -546,13 +673,21 @@ export function injectCustomShaderChunks(obj) {
 
 const mediaPos = new THREE.Vector3();
 
-export function addAndArrangeMedia(el, media, contentSubtype, snapCount, mirrorOrientation = false, distance = 0.75) {
+// Adds media radiating from the centerEl vertically
+export function addAndArrangeRadialMedia(
+  centerEl,
+  media,
+  contentSubtype,
+  snapCount,
+  mirrorOrientation = false,
+  distance = 0.75
+) {
   const { entity, orientation } = addMedia(media, null, "#interactable-media", undefined, contentSubtype, false);
 
-  const pos = el.object3D.position;
+  const pos = centerEl.object3D.position;
 
   entity.object3D.position.set(pos.x, pos.y, pos.z);
-  entity.object3D.rotation.copy(el.object3D.rotation);
+  entity.object3D.rotation.copy(centerEl.object3D.rotation);
 
   if (mirrorOrientation) {
     entity.object3D.rotateY(Math.PI);
@@ -568,7 +703,7 @@ export function addAndArrangeMedia(el, media, contentSubtype, snapCount, mirrorO
     -0.05 + idx * 0.001
   );
 
-  el.object3D.localToWorld(mediaPos);
+  centerEl.object3D.localToWorld(mediaPos);
   entity.object3D.visible = false;
 
   const handler = () => {
@@ -600,12 +735,92 @@ export function addAndArrangeMedia(el, media, contentSubtype, snapCount, mirrorO
   entity.addEventListener(
     "media_resolved",
     () => {
-      el.emit(`${eventType}_taken`, entity.components["media-loader"].data.src);
+      centerEl.emit(`${eventType}_taken`, entity.components["media-loader"].data.src);
     },
     { once: true }
   );
 
   return { entity, orientation };
+}
+
+// Arranges media around the centerEl in X + Z, as chairs in a roundtable discussion
+export function addAndArrangeRoundtableMedia(
+  centerMatrixWorld,
+  media,
+  width,
+  margin,
+  numItems,
+  itemIndex,
+  mediaOptions = {},
+  ground = false,
+  phiStart = -Math.PI,
+  phiEnd = Math.PI
+) {
+  const entities = [];
+
+  const bbox = new THREE.Box3();
+  const phiSpan = Math.abs(phiStart - phiEnd);
+
+  const circumference = (width * numItems + (margin * numItems + 1)) * ((Math.PI * 2) / phiSpan);
+  const radius = circumference / (2 * Math.PI);
+
+  for (let phi = phiEnd, i = 0; phi >= phiStart; phi -= phiSpan / numItems, i++) {
+    if (i !== itemIndex) continue;
+
+    const { entity, orientation } = addMedia(
+      media, // src
+      null, // contents
+      "#interactable-media", // template
+      undefined, // contentOrigin
+      null, // contentSubtype
+      true, // resolve
+      true, // fitToBox
+      false, // animate
+      mediaOptions, // mediaOptions
+      true, // networked
+      null, // parentEl
+      null, // linkedEl
+      null, // networkId
+      true, // skipLoader
+      null, // contentType
+      true // locked
+    );
+
+    entity.addEventListener(
+      "media-loaded",
+      () => {
+        orientation.then(async or => {
+          const obj = entity.object3D;
+          const offset = new THREE.Vector3(0, 0, -radius);
+          const lookAt = true;
+
+          if (isSynchronized(entity) && !ensureOwnership(entity)) {
+            console.warn("Cannot arrange element because unable to become owner.");
+            return;
+          }
+
+          offsetRelativeTo(obj, centerMatrixWorld, offset, lookAt, or, null, null, null, true, phi);
+
+          // scale to width
+          bbox.makeEmpty();
+          expandByEntityObjectSpaceBoundingBox(bbox, entity);
+
+          const targetScale = width / (bbox.max.x - bbox.min.x);
+          entity.object3D.scale.x = entity.object3D.scale.y = entity.object3D.scale.z = targetScale;
+          entity.object3D.matrixNeedsUpdate = true;
+
+          if (ground) {
+            groundMedia(entity, false, null, 0.0, false, true);
+          }
+        });
+      },
+      { once: true }
+    );
+
+    entities.push(entity);
+  }
+
+  return entities;
 }
 
 export const textureLoader = new HubsTextureLoader().setCrossOrigin("anonymous");
@@ -824,6 +1039,15 @@ export function performAnimatedRemove(el, callback) {
   });
 }
 
+export function isLockedMedia(el) {
+  return !!(el && el.components["media-loader"] && el.components["media-loader"].data.locked);
+}
+
+export function isNextPrevMedia(el) {
+  const component = getMediaViewComponent(el);
+  return NEXT_PREV_MEDIA_VIEW_COMPONENTS.includes(component?.name);
+}
+
 export const spawnMediaInfrontOfPlayer = (
   src,
   contents,
@@ -832,8 +1056,12 @@ export const spawnMediaInfrontOfPlayer = (
   mediaOptions = null,
   networked = true,
   skipResolve = false,
-  zOffset = -1.5,
-  yOffset = 0
+  contentType = null,
+  zOffset = -2.5,
+  yOffset = 0,
+  stackAxis = 0,
+  stackSnapPosition = false,
+  stackSnapScale = false
 ) => {
   if (!window.APP.hubChannel.can("spawn_and_move_media")) return;
   if (src instanceof File && !window.APP.hubChannel.can("upload_files")) return;
@@ -848,7 +1076,16 @@ export const spawnMediaInfrontOfPlayer = (
     true,
     true,
     mediaOptions,
-    networked
+    networked,
+    null,
+    null,
+    null,
+    false,
+    contentType,
+    false,
+    stackAxis,
+    stackSnapPosition,
+    stackSnapScale
   );
 
   orientation.then(or => {
@@ -860,4 +1097,99 @@ export const spawnMediaInfrontOfPlayer = (
   });
 
   return entity;
+};
+
+export const hasActiveScreenShare = () => {
+  const videoEls = document.querySelectorAll("[media-video]");
+
+  for (const videoEl of videoEls) {
+    const component = videoEl.components["media-video"];
+
+    if (component.data.contentType === "video/vnd.jel-webrtc") {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+const MAX_SCREENSHARE_SNAP_TARGET_DISTANCE_PER_UNIT_VOLUME = 0.15;
+const MIN_SCREENSHARE_SNAP_TARGET_DISTANCE = 25.0;
+
+export const snapEntityToBiggestNearbyScreen = entity => {
+  let bestEntity = null;
+  let bestEntityVolume = -Infinity;
+  const bestEntityCenter = new THREE.Vector3();
+
+  const v = new THREE.Vector3();
+  const avatarPos = new THREE.Vector3();
+  document.getElementById("avatar-rig").object3D.getWorldPosition(avatarPos);
+  const box = new THREE.Box3();
+
+  // Screen target is a position/scale snappable vox that snaps to walls
+  for (const el of document.querySelectorAll("[media-vox]")) {
+    const mediaLoader = el.components["media-loader"];
+    if (!mediaLoader) continue;
+    if (!mediaLoader.data.stackSnapPosition) continue;
+    if (!mediaLoader.data.stackSnapScale) continue;
+    if (mediaLoader.data.stackAxis === null) continue;
+
+    const axis = NON_FLAT_STACK_AXES[mediaLoader.data.stackAxis];
+
+    // Skip over 3d snap zones, which are stacked face up along y
+    if (axis.y !== 0) continue;
+
+    box.makeEmpty();
+    expandByEntityObjectSpaceBoundingBox(box, el);
+    el.object3D.updateMatrices();
+    box.applyMatrix4(el.object3D.matrixWorld);
+    box.getSize(v);
+
+    const volume = v.x * v.y * v.z;
+    box.getCenter(v);
+
+    const dist = v.distanceTo(avatarPos);
+
+    const testDist = Math.max(
+      MIN_SCREENSHARE_SNAP_TARGET_DISTANCE,
+      volume * MAX_SCREENSHARE_SNAP_TARGET_DISTANCE_PER_UNIT_VOLUME
+    );
+
+    if (volume > bestEntityVolume && dist < testDist) {
+      bestEntity = el;
+      bestEntityVolume = volume;
+      bestEntityCenter.copy(v);
+    }
+  }
+
+  if (bestEntity) {
+    v.copy(bestEntityCenter);
+    v.sub(avatarPos);
+    v.normalize();
+
+    const voxSource = bestEntity.components["media-vox"].mesh;
+    const intersection = SYSTEMS.voxSystem.raycastToVoxSource(avatarPos, v, voxSource);
+
+    if (intersection) {
+      box.makeEmpty();
+      expandByEntityObjectSpaceBoundingBox(box, bestEntity);
+      const target = entity.object3D;
+      const targetBoundingBox = new THREE.Box3();
+      const targetMatrix = new THREE.Matrix4();
+      targetMatrix.copy(target.matrix);
+      expandByEntityObjectSpaceBoundingBox(targetBoundingBox, entity);
+
+      stackTargetAt(
+        target,
+        targetBoundingBox,
+        targetMatrix,
+        0, // stackAlongAxis
+        0, // stackRotationAmount
+        intersection.point,
+        intersection.face.normal,
+        voxSource,
+        box
+      );
+    }
+  }
 };

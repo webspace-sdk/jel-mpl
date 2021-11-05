@@ -3,6 +3,9 @@ import protooClient from "protoo-client";
 import { debug as newDebug } from "debug";
 import { setupPeerConnectionConfig } from "../jel/utils/jel-url-utils";
 import { EventTarget } from "event-target-shim";
+import qsTruthy from "./utils/qs_truthy";
+
+const skipLipsync = qsTruthy("skip_lipsync");
 
 // If the browser supports insertable streams, we insert a 5 byte payload at the end of the voice
 // frame encoding 4 magic bytes and 1 viseme byte. This is a hack because on older browsers
@@ -310,7 +313,7 @@ export default class DialogAdapter extends EventTarget {
                 this._audioConsumerResolvers.delete(peerId);
               }
 
-              if (supportsInsertableStreams) {
+              if (!skipLipsync && supportsInsertableStreams) {
                 // Add viseme decoder
                 const self = this;
 
@@ -865,7 +868,8 @@ export default class DialogAdapter extends EventTarget {
                 this._micProducer = await this._sendTransport.produce({
                   track,
                   stopTracks: false,
-                  zeroRtpOnPause: true,
+                  // If this is set to true, audio can end up being delayed behind visemes
+                  zeroRtpOnPause: false,
                   codecOptions: { opusStereo: false, opusDtx: true },
                   encodings: [{ maxBitrate: 64000 }]
                 });

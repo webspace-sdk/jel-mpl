@@ -16,39 +16,26 @@ import HLS from "hls.js";
 import { RENDER_ORDER } from "../constants";
 import { MediaPlayer } from "dashjs";
 import {
-  addAndArrangeMedia,
+  addAndArrangeRadialMedia,
   createImageTexture,
   createBasisTexture,
   meetsBatchingCriteria,
   hasMediaLayer,
   scaleToAspectRatio,
-  groundMedia,
+  resetMediaRotation,
   MEDIA_INTERACTION_TYPES
 } from "../utils/media-utils";
 import { proxiedUrlFor, getCorsProxyServer } from "../utils/media-url-utils";
 import { buildAbsoluteURL } from "url-toolkit";
 import { SOUND_CAMERA_TOOL_TOOK_SNAPSHOT } from "../systems/sound-effects-system";
 import { promisifyWorker } from "../utils/promisify-worker.js";
-import pdfjs from "pdfjs-dist";
 import { applyPersistentSync } from "../utils/permissions-utils";
 import { refreshMediaMirror, getCurrentMirroredMedia } from "../utils/mirror-utils";
 import { MEDIA_PRESENCE } from "../utils/media-utils";
 import { disposeExistingMesh, disposeTexture, disposeTextureImage } from "../utils/three-utils";
 import { addVertexCurvingToMaterial } from "../../jel/systems/terrain-system";
 import { chicletGeometry, chicletGeometryFlipped } from "../../jel/objects/chiclet-geometry.js";
-
-/**
- * Warning! This require statement is fragile!
- *
- * How it works:
- * require -> require the file after all import statements have been called, particularly the configs.js import which modifies __webpack_public_path__
- * !! -> don't run any other loaders
- * file-loader -> make webpack move the file into the dist directory and return the file path
- * outputPath -> where to put the file
- * name -> how to name the file
- * Then the path to the worker script
- */
-pdfjs.GlobalWorkerOptions.workerSrc = require("!!file-loader?outputPath=assets/js&name=[name]-[hash].js!pdfjs-dist/build/pdf.worker.min.js");
+import { retainPdf, releasePdf } from "../../jel/utils/pdf-pool";
 
 const ONCE_TRUE = { once: true };
 const TYPE_IMG_PNG = { type: "image/png" };
@@ -413,7 +400,7 @@ AFRAME.registerComponent("media-video", {
     const file = new File([blob], "snap.png", TYPE_IMG_PNG);
 
     this.localSnapCount++;
-    const { entity } = addAndArrangeMedia(this.el, file, "photo-snapshot", this.localSnapCount);
+    const { entity } = addAndArrangeRadialMedia(this.el, file, "photo-snapshot", this.localSnapCount);
     entity.addEventListener("image-loaded", this.onSnapImageLoaded, ONCE_TRUE);
   },
 
@@ -1201,6 +1188,8 @@ AFRAME.registerComponent("media-image", {
       if (!disposeTexture) {
         this.mesh.material.map = null;
       }
+    } else if (this.mesh && this.mesh.material && this.mesh.material.map === errorTexture) {
+      this.mesh.material.map = null;
     }
 
     disposeExistingMesh(this.el);
@@ -1479,8 +1468,8 @@ AFRAME.registerComponent("media-image", {
       window.open(this.el.components["media-loader"].data.src);
     }
 
-    if (type === MEDIA_INTERACTION_TYPES.DOWN) {
-      groundMedia(this.el, true);
+    if (type === MEDIA_INTERACTION_TYPES.RESET) {
+      resetMediaRotation(this.el);
     }
   }
 });
@@ -1491,7 +1480,8 @@ AFRAME.registerComponent("media-pdf", {
     projection: { type: "string", default: "flat" },
     contentType: { type: "string" },
     index: { default: 0 },
-    batch: { default: false }
+    batch: { default: false },
+    pagable: { default: true }
   },
 
   init() {
@@ -1520,7 +1510,7 @@ AFRAME.registerComponent("media-pdf", {
     const file = new File([blob], "snap.png", TYPE_IMG_PNG);
 
     this.localSnapCount++;
-    const { entity } = addAndArrangeMedia(this.el, file, "photo-snapshot", this.localSnapCount, false, 1);
+    const { entity } = addAndArrangeRadialMedia(this.el, file, "photo-snapshot", this.localSnapCount, false, 1);
     entity.addEventListener("image-loaded", this.onSnapImageLoaded, ONCE_TRUE);
   },
 
@@ -1615,24 +1605,19 @@ AFRAME.registerComponent("media-pdf", {
             await this.disposePdfEngine();
             if (loadingSrc !== this.data.src) return;
 
-            let pdf;
-            try {
-              pdf = await pdfjs.getDocument(src).promise;
-            } catch (e) {
-              if (pdf) {
-                pdf.destroy();
-              }
-              throw e;
-            }
+            const pdf = await retainPdf(src);
 
             if (loadingSrc !== this.data.src && pdf) {
-              pdf.destroy();
+              releasePdf(pdf);
               return;
             }
 
             this.pdf = pdf;
             this.loadedPdfSrc = this.data.src;
-            this.el.setAttribute("media-pager", { maxIndex: this.pdf.numPages - 1 });
+
+            if (this.el.components["media-pager"]) {
+              this.el.setAttribute("media-pager", { maxIndex: this.pdf.numPages - 1 });
+            }
           }
 
           const page = await this.pdf.getPage(index + 1);
@@ -1717,7 +1702,7 @@ AFRAME.registerComponent("media-pdf", {
       this.renderTask = null;
     }
 
-    pdf.destroy();
+    await releasePdf(pdf);
   },
 
   handleMediaInteraction(type) {
@@ -1734,21 +1719,23 @@ AFRAME.registerComponent("media-pdf", {
       return;
     }
 
-    if (type === MEDIA_INTERACTION_TYPES.DOWN) {
-      groundMedia(this.el, true);
+    if (type === MEDIA_INTERACTION_TYPES.RESET) {
+      resetMediaRotation(this.el);
       return;
     }
 
-    let newIndex;
+    if (this.data.pagable) {
+      let newIndex;
 
-    if (type === MEDIA_INTERACTION_TYPES.BACK) {
-      newIndex = Math.max(this.data.index - 1, 0);
-    } else if (type === MEDIA_INTERACTION_TYPES.PRIMARY || type === MEDIA_INTERACTION_TYPES.NEXT) {
-      const maxIndex = this.pdf.numPages - 1;
-      newIndex = Math.min(this.data.index + 1, maxIndex);
+      if (type === MEDIA_INTERACTION_TYPES.BACK) {
+        newIndex = Math.max(this.data.index - 1, 0);
+      } else if (type === MEDIA_INTERACTION_TYPES.PRIMARY || type === MEDIA_INTERACTION_TYPES.NEXT) {
+        const maxIndex = this.pdf.numPages - 1;
+        newIndex = Math.min(this.data.index + 1, maxIndex);
+      }
+
+      this.el.setAttribute("media-pdf", "index", newIndex);
     }
-
-    this.el.setAttribute("media-pdf", "index", newIndex);
   }
 });
 
@@ -1913,7 +1900,7 @@ AFRAME.registerComponent("media-canvas", {
     const file = new File([blob], "snap.png", TYPE_IMG_PNG);
 
     this.localSnapCount++;
-    const { entity } = addAndArrangeMedia(this.el, file, "photo-snapshot", this.localSnapCount);
+    const { entity } = addAndArrangeRadialMedia(this.el, file, "photo-snapshot", this.localSnapCount);
     entity.addEventListener("image-loaded", this.onSnapImageLoaded, ONCE_TRUE);
   },
 

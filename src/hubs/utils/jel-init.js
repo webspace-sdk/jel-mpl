@@ -12,6 +12,7 @@ import { navigateToHubUrl } from "../../jel/utils/jel-url-utils";
 import qsTruthy from "./qs_truthy";
 import { getReticulumMeta, invalidateReticulumMeta, connectToReticulum } from "./phoenix-utils";
 import HubStore from "../storage/hub-store";
+import MediaTree from "../../jel/utils/media-tree";
 import WorldImporter from "../../jel/utils/world-importer";
 import { getHtmlForTemplate, applyTemplate } from "../../jel/utils/template-utils";
 import { clearVoxAttributePools } from "../../jel/objects/JelVoxBufferGeometry";
@@ -603,7 +604,7 @@ let updateTitleAndWorldForHubHandler;
 
 const joinHubChannel = (hubPhxChannel, hubStore, entryManager, remountUI, remountJelUI) => {
   let isInitialJoin = true;
-  const { spaceChannel, hubChannel, hubMetadata, matrix } = window.APP;
+  const { spaceChannel, hubChannel, spaceMetadata, hubMetadata, matrix } = window.APP;
 
   return new Promise(joinFinished => {
     hubPhxChannel
@@ -673,6 +674,9 @@ const joinHubChannel = (hubPhxChannel, hubStore, entryManager, remountUI, remoun
           }
 
           if (isInitialJoin) {
+            // Reset inspect if we switched while inspecting
+            SYSTEMS.cameraSystem.uninspect();
+
             THREE.Cache.clear();
 
             // Clear voxmojis from prior world
@@ -682,6 +686,7 @@ const joinHubChannel = (hubPhxChannel, hubStore, entryManager, remountUI, remoun
 
             // Free memory from voxel editing undo stacks.
             SYSTEMS.builderSystem.clearUndoStacks();
+            SYSTEMS.undoSystem.clearUndoStacks();
 
             clearVoxAttributePools();
 
@@ -723,7 +728,26 @@ const joinHubChannel = (hubPhxChannel, hubStore, entryManager, remountUI, remoun
           remountJelUI({ unavailableReason: "closed" });
         } else if (res.reason === "join_denied") {
           entryManager.exitScene();
-          remountJelUI({ unavailableReason: "denied" });
+
+          // Check if we can invite ourselves to the space.
+          spaceMetadata.getOrFetchMetadata(spaceChannel.spaceId).then(async ({ permissions: { create_invite } }) => {
+            if (create_invite) {
+              // Kind of hacky, get hub id and create new space channel.
+              const spaceId = spaceChannel.spaceId;
+              const hubId = hubPhxChannel.topic.split(":")[1];
+
+              const socket = await connectToReticulum();
+
+              const spacePhxChannel = socket.channel(spaceChannel.channel.topic, createSpaceChannelParams());
+
+              spacePhxChannel.join().receive("ok", async () => {
+                spaceChannel.bind(spacePhxChannel, spaceId);
+                document.location = await spaceChannel.createInvite(hubId);
+              });
+            } else {
+              remountJelUI({ unavailableReason: "denied" });
+            }
+          });
         }
 
         joinFinished(false);
@@ -899,6 +923,11 @@ export function joinSpace(socket, history, subscriptions, entryManager, remountU
   hasJoinedPublicWorldForCurrentSpace = false;
 
   const treeManager = new TreeManager(spaceMetadata, hubMetadata);
+  const voxTree = new MediaTree("vox");
+  const sceneTree = new MediaTree("world_templates");
+
+  voxTree.build();
+  sceneTree.build();
 
   document.body.addEventListener(
     "share-connected",
@@ -915,7 +944,7 @@ export function joinSpace(socket, history, subscriptions, entryManager, remountU
         await addNewHubToTree(treeManager, spaceId, "channel", null, "General Discussion");
         await addNewHubToTree(treeManager, spaceId, "channel", null, "Random");
 
-        for (const world of ["first", "welcome", "whats-new", "faq"]) {
+        for (const world of ["first"]) {
           const name = getMessages()[`space.${world}-world-name`];
           const templateName = world;
           const html = getHtmlForTemplate(templateName);
@@ -948,7 +977,7 @@ export function joinSpace(socket, history, subscriptions, entryManager, remountU
         store.update({ context: { isFirstVisitToSpace: false } });
       }
 
-      remountJelUI({ history, treeManager });
+      remountJelUI({ history, treeManager, voxTree, sceneTree });
     },
     { once: true }
   );

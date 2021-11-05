@@ -2,9 +2,9 @@ import { paths } from "../paths";
 import { ArrayBackedSet } from "../array-backed-set";
 import { isInEditableField } from "../../../../jel/utils/dom-utils";
 import { isInQuillEditor } from "../../../../jel/utils/quill-utils";
+import { isLockedMedia } from "../../../../hubs/utils/media-utils";
 import { beginPersistentCursorLock, endCursorLock } from "../../../../jel/utils/dom-utils";
 import { CURSOR_LOCK_STATES, getCursorLockState } from "../../../../jel/utils/dom-utils";
-import { PAGABLE_MEDIA_VIEW_COMPONENTS } from "../../../utils/media-utils";
 import { BRUSH_TYPES, BRUSH_MODES } from "../../../../jel/constants";
 
 export class KeyboardDevice {
@@ -64,14 +64,12 @@ export class KeyboardDevice {
             } else if (e.code === "Digit3") {
               SYSTEMS.builderSystem.toggleMirrorZ();
               e.preventDefault();
-            }
-          }
-
-          if (e.ctrlKey) {
-            if (e.code === "KeyZ") {
+            } else if (e.code === "KeyZ") {
               SYSTEMS.builderSystem.doUndo();
+              e.preventDefault();
             } else if (e.code === "KeyY") {
               SYSTEMS.builderSystem.doRedo();
+              e.preventDefault();
             }
           }
         }
@@ -81,37 +79,33 @@ export class KeyboardDevice {
           e.preventDefault();
         }
 
-        // Blur focused elements when a popup menu is open so it is closed
-        if (e.type === "keydown" && e.key === "Escape" && isInEditableField()) {
-          canvas.focus();
-          e.preventDefault();
+        if (e.type === "keydown" && e.key === "Escape") {
+          // Blur focused elements when a popup menu is open so it is closed
+          if (isInEditableField()) {
+            canvas.focus();
+            e.preventDefault();
+          } else {
+            // On ESC, show panels if necessary when in unlocked cursor mode.
+            if (getCursorLockState() === CURSOR_LOCK_STATES.UNLOCKED_PERSISTENT) {
+              SYSTEMS.uiAnimationSystem.expandSidePanels();
+            }
+          }
         }
 
-        // Handle spacebar here since input system can't differentiate with and without modifier key held, and deal with repeats
+        // Handle spacebar widen here since input system can't differentiate with and without modifier key held, and deal with repeats
         if (e.type === "keydown" && e.key === " " && !e.repeat) {
           if (!e.altKey && !e.metaKey) {
             if (e.ctrlKey && !isInEditableField()) {
               const interaction = AFRAME.scenes[0].systems.interaction;
 
-              const hovered =
-                interaction.state.leftHand.hovered ||
-                interaction.state.rightHand.hovered ||
-                interaction.state.rightRemote.hovered ||
-                interaction.state.leftRemote.hovered;
+              // Ignore widen when holding, since this is used for snapping.
+              const held =
+                interaction.state.leftHand.held ||
+                interaction.state.rightHand.held ||
+                interaction.state.rightRemote.held ||
+                interaction.state.leftRemote.held;
 
-              // Paging using ctrl-space, so skip
-              let hoveredOverPagableMedia = false;
-
-              if (hovered) {
-                for (const name of PAGABLE_MEDIA_VIEW_COMPONENTS) {
-                  if (hovered.components[name]) {
-                    hoveredOverPagableMedia = true;
-                    break;
-                  }
-                }
-              }
-
-              if (!hoveredOverPagableMedia) {
+              if (!held) {
                 const cursorLockState = getCursorLockState();
 
                 // Shift+Space widen
@@ -148,18 +142,42 @@ export class KeyboardDevice {
         }
 
         // ` in text editor blurs it, also non-modifier key @ for japanese keyboards since ` is missing
-        if (
-          e.type === "keydown" &&
-          (e.code === "Backquote" || (e.key === "@" && e.code === "BracketLeft")) &&
-          isInQuillEditor()
-        ) {
-          window.APP.store.handleActivityFlag("mediaTextEditClose");
-          // Without this, quill grabs focus when others types
-          document.activeElement.parentElement.__quill.blur();
+        // ` when editing vox exits inspector
+        // ` otherwise toggles panels
+        if (e.type === "keydown" && (e.code === "Backquote" || (e.key === "@" && e.code === "BracketLeft"))) {
+          if (isInQuillEditor()) {
+            window.APP.store.handleActivityFlag("mediaTextEditClose");
+            // Without this, quill grabs focus when others types
+            document.activeElement.parentElement.__quill.blur();
+            canvas.focus();
+            pushEvent = false; // Prevent primary action this tick if cursor still over 3d text page
+            e.preventDefault();
+          } else if (SYSTEMS.cameraSystem.isInspecting() && !isInEditableField()) {
+            // HACK if we uninspect this tick the media interaction system will run thinking
+            // inspection wasn't happening, and will re-trigger.
+            setTimeout(() => SYSTEMS.cameraSystem.uninspect(), 25);
+          } else if (getCursorLockState() === CURSOR_LOCK_STATES.UNLOCKED_PERSISTENT) {
+            const interaction = AFRAME.scenes[0].systems.interaction;
 
-          canvas.focus();
-          pushEvent = false; // Prevent primary action this tick if cursor still over 3d text page
-          e.preventDefault();
+            const hovered =
+              interaction.state.leftHand.hovered ||
+              interaction.state.rightHand.hovered ||
+              interaction.state.rightRemote.hovered ||
+              interaction.state.leftRemote.hovered;
+
+            const held =
+              interaction.state.leftHand.held ||
+              interaction.state.rightHand.held ||
+              interaction.state.rightRemote.held ||
+              interaction.state.leftRemote.held;
+
+            // Ignore widen when holding, since this is used for snapping.
+            const heldOrHoveredOnNonLocked = held || (hovered && !isLockedMedia(hovered));
+
+            if (!heldOrHoveredOnNonLocked) {
+              SYSTEMS.uiAnimationSystem.toggleSidePanels();
+            }
+          }
         }
 
         // / in create popup blurs it

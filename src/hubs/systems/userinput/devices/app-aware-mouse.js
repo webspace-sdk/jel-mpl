@@ -18,6 +18,7 @@ const wKeyPath = paths.device.keyboard.key("w");
 const aKeyPath = paths.device.keyboard.key("a");
 const sKeyPath = paths.device.keyboard.key("s");
 const dKeyPath = paths.device.keyboard.key("d");
+const spaceKeyPath = paths.device.keyboard.key(" ");
 const shiftKeyPath = paths.device.keyboard.key("shift");
 const tabKeyPath = paths.device.keyboard.key("tab");
 const upKeyPath = paths.device.keyboard.key("arrowup");
@@ -31,11 +32,11 @@ const HIDE_CURSOR_AFTER_IDLE_MS = 2000.0;
 const calculateCursorPose = function(camera, cursorX, cursorY, origin, direction, cursorPose) {
   camera.updateMatrices();
   origin.setFromMatrixPosition(camera.matrixWorld);
-  direction
-    .set(cursorX, cursorY, 0.5)
-    .unproject(camera)
-    .sub(origin)
-    .normalize();
+
+  direction.set(cursorX, cursorY, -0.5);
+  SYSTEMS.cameraSystem.unprojectCameraOn(direction);
+  direction.sub(origin).normalize();
+
   cursorPose.fromOriginAndDirection(origin, direction);
   return cursorPose;
 };
@@ -44,7 +45,7 @@ export class AppAwareMouseDevice {
   constructor() {
     this.prevButtonRight = false;
     this.prevGrabKey = false;
-    this.grabGesturedAnything = false;
+    this.isGrabbingForMove = false;
     this.lockClickCoordDelta = [0, 0];
     this.transformStartCoordDelta = [0, 0];
     this.prevCoords = [Infinity, Infinity];
@@ -79,26 +80,35 @@ export class AppAwareMouseDevice {
       }
     }
 
+    this.transformSystem = this.transformSystem || AFRAME.scenes[0].systems["transform-selected-object"];
+    this.scaleSystem = this.scaleSystem || AFRAME.scenes[0].systems["scale-object"];
+    const isTransforming =
+      !!(this.transformSystem && this.transformSystem.transforming) ||
+      !!(this.scaleSystem && this.scaleSystem.isScaling);
+
+    const isGrabTransforming = this.transformSystem.isGrabTransforming();
+    const isSnappableTransforming = this.transformSystem.isSnappableTransforming();
+    const isNonGrabTransforming = isTransforming && !isGrabTransforming;
+
+    const { cameraSystem, cursorTargettingSystem } = SYSTEMS;
     const buttonLeft = frame.get(paths.device.mouse.buttonLeft);
+    const buttonMiddle = frame.get(paths.device.mouse.buttonMiddle);
     const buttonRight = frame.get(paths.device.mouse.buttonRight);
-    const mouseLookKey = frame.get(shiftKeyPath) && !isInEditableField();
+    const inspectPanKey = frame.get(spaceKeyPath);
+    const mouseLookKey = frame.get(shiftKeyPath) && !isInEditableField() && !isSnappableTransforming;
     const grabKey = frame.get(tabKeyPath);
     const userinput = AFRAME.scenes[0].systems.userinput;
 
     if (((buttonRight && !this.prevButtonRight) || (grabKey && !this.prevGrabKey)) && this.cursorController) {
       const rawIntersections = [];
-      this.cursorController.raycaster.intersectObjects(
-        AFRAME.scenes[0].systems["hubs-systems"].cursorTargettingSystem.targets,
-        true,
-        rawIntersections
-      );
-      const intersection = rawIntersections.find(x => x.object.el);
+      this.cursorController.raycaster.intersectObjects(cursorTargettingSystem.targets, true, rawIntersections);
+      const intersection = rawIntersections.find(x => x.object.el && x.object.material);
       const remoteHoverTarget = intersection && findRemoteHoverTarget(intersection.object, intersection.instanceId);
       const isInteractable = intersection && intersection.object.el.matches(".interactable, .interactable *");
       const template = remoteHoverTarget && getNetworkedTemplate(remoteHoverTarget);
       const isStaticControlledMedia = template && template === "#static-controlled-media";
       const isStaticMedia = template && template === "#static-media";
-      this.grabGesturedAnything =
+      this.isGrabbingForMove =
         (isInteractable &&
           (remoteHoverTarget && canMove(remoteHoverTarget)) &&
           !isStaticControlledMedia &&
@@ -110,23 +120,27 @@ export class AppAwareMouseDevice {
     this.prevButtonRight = buttonRight;
     this.prevGrabKey = grabKey;
 
-    if (!buttonRight && !grabKey) {
-      this.grabGesturedAnything = false;
+    if ((!buttonRight && !grabKey) || isGrabTransforming) {
+      this.isGrabbingForMove = false;
     }
 
-    this.transformSystem = this.transformSystem || AFRAME.scenes[0].systems["transform-selected-object"];
-    this.scaleSystem = this.scaleSystem || AFRAME.scenes[0].systems["scale-object"];
-    this.cameraSystem = this.cameraSystem || AFRAME.scenes[0].systems["hubs-systems"].cameraSystem;
-    const isTransforming =
-      (this.transformSystem && this.transformSystem.transforming) || (this.scaleSystem && this.scaleSystem.isScaling);
-
     const isHoveringUI = userinput.activeSets.includes(sets.rightCursorHoveringOnUI);
-    const isMouseLookingGesture = mouseLookKey || (buttonLeft && (!isHoveringUI || isCursorLocked()));
+    const isInspecting = cameraSystem.isInspecting();
+
+    let isMouseLookingGesture;
+
+    if (isInspecting) {
+      isMouseLookingGesture = buttonMiddle || buttonRight || inspectPanKey; // Rotate or pan
+    } else {
+      isMouseLookingGesture =
+        mouseLookKey || // Holding shift
+        (buttonLeft && (!isHoveringUI || isCursorLocked())); // Mouse look
+    }
 
     // Handle ephemeral mouse locking for look key/button
     if (isMouseLookingGesture) {
       beginEphemeralCursorLock();
-    } else if (!isTransforming) {
+    } else if (!isNonGrabTransforming) {
       releaseEphemeralCursorLock();
     }
 
@@ -139,7 +153,7 @@ export class AppAwareMouseDevice {
     // Reset gaze cursor to center if user moves or clicks on environment
     if (cursorIsLocked) {
       // HACK, can't read character acceleration yet here, so just look at keys (which are added before mouse.)
-      const isMoving =
+      const isAvatarMoving =
         userinput.get(wKeyPath) ||
         userinput.get(aKeyPath) ||
         userinput.get(sKeyPath) ||
@@ -149,7 +163,7 @@ export class AppAwareMouseDevice {
         userinput.get(leftKeyPath) ||
         userinput.get(rightKeyPath);
 
-      if (!this.grabGesturedAnything && ((buttonLeft && !isTransforming) || buttonRight || isMoving)) {
+      if (!this.isGrabbingForMove && ((buttonLeft && !isTransforming) || buttonRight || isAvatarMoving)) {
         this.lockClickCoordDelta[0] = 0;
         this.lockClickCoordDelta[1] = 0;
       }
@@ -167,7 +181,7 @@ export class AppAwareMouseDevice {
       this.hideCursorAfterIdleTime = performance.now() + HIDE_CURSOR_AFTER_IDLE_MS;
     }
 
-    if (cursorIsLocked && (this.grabGesturedAnything || isTransforming)) {
+    if (cursorIsLocked && (this.isGrabbingForMove || isTransforming)) {
       this.lockClickCoordDelta[0] += movementXScreen;
       this.lockClickCoordDelta[1] += movementYScreen;
     }
@@ -179,8 +193,9 @@ export class AppAwareMouseDevice {
       useGazeCursor &&
       this.lockClickCoordDelta[0] === 0 &&
       this.lockClickCoordDelta[1] === 0 &&
-      !isTransforming &&
-      !this.grabGesturedAnything &&
+      !isNonGrabTransforming &&
+      !isInspecting &&
+      !this.isGrabbingForMove &&
       now < this.hideCursorAfterIdleTime &&
       !SYSTEMS.directorSystem.trackingCamera
     );
@@ -188,8 +203,9 @@ export class AppAwareMouseDevice {
     // The 3D cursor visibility is coordinated via CSS classes on the body.
     const show3DCursor = !!(
       !AFRAME.scenes[0].is("pointer-exited") &&
-      !isTransforming &&
-      !this.grabGesturedAnything &&
+      !isNonGrabTransforming &&
+      !(isInspecting && isMouseLookingGesture) &&
+      !this.isGrabbingForMove &&
       !showCSSCursor &&
       (!isMouseLookingGesture || this.lockClickCoordDelta[0] !== 0 || this.lockClickCoordDelta[1] !== 0) &&
       now < this.hideCursorAfterIdleTime &&
@@ -207,7 +223,7 @@ export class AppAwareMouseDevice {
     }
 
     if (cursorIsLocked) {
-      if (isTransforming) {
+      if (isNonGrabTransforming) {
         this.transformStartCoordDelta[0] += movementXScreen;
         this.transformStartCoordDelta[1] += movementYScreen;
       } else {
@@ -217,19 +233,21 @@ export class AppAwareMouseDevice {
           this.lockClickCoordDelta[1] -= this.transformStartCoordDelta[1];
         }
 
-        this.transformStartCoordDelta[0] = 0;
-        this.transformStartCoordDelta[1] = 0;
+        if (!this.isGrabbingForMove) {
+          this.transformStartCoordDelta[0] = 0;
+          this.transformStartCoordDelta[1] = 0;
+        }
       }
     }
 
     // Move camera out of lock mode on LMB, or, in lock mode, when not holding something or
     // when holding something after panning past a certain FOV angle.
     const shouldMoveCamera =
-      (cursorIsLocked && !this.grabGesturedAnything && !isTransforming) ||
+      (cursorIsLocked && !this.isGrabbingForMove && !isNonGrabTransforming) ||
       (cursorIsLocked &&
         (Math.abs(this.lockClickCoordDelta[0]) > 0.2 || Math.abs(this.lockClickCoordDelta[1]) > 0.2) &&
-        !isTransforming) ||
-      !this.cameraSystem.isInAvatarView();
+        !isNonGrabTransforming) ||
+      !cameraSystem.isInAvatarView();
 
     const coords = frame.get(paths.device.mouse.coords);
 

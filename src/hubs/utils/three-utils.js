@@ -1,4 +1,7 @@
 import { MeshBVH } from "three-mesh-bvh";
+import nextTick from "./next-tick";
+import { upload } from "./media-utils";
+import { dataURItoBlob } from "../../jel/utils/dom-utils";
 
 const tempVector3 = new THREE.Vector3();
 const tempQuaternion = new THREE.Quaternion();
@@ -124,6 +127,7 @@ export function setMatrixWorld(object3D, m) {
   }
   object3D.matrix.decompose(object3D.position, object3D.quaternion, object3D.scale);
   object3D.childrenNeedMatrixWorldUpdate = true;
+  object3D.worldMatrixConsumerFlags = 0x00;
 }
 
 // Modified version of Don McCurdy's AnimationUtils.clone
@@ -418,6 +422,17 @@ export const childMatch = (function() {
   };
 })();
 
+export function isChildOf(obj, parent) {
+  let node = obj.parent;
+
+  do {
+    if (node === parent) return true;
+    node = node.parent;
+  } while (node !== null);
+
+  return false;
+}
+
 export function generateMeshBVH(object3D, force = true) {
   object3D.traverse(obj => {
     // note that we might already have a bounds tree if this was a clone of an object with one
@@ -438,4 +453,105 @@ export function generateMeshBVH(object3D, force = true) {
       }
     }
   });
+}
+
+const _box = new THREE.Box3();
+
+const expandByObjectSpaceBoundingBox = (bbox, object, mat = null) => {
+  const geometry = object.geometry;
+
+  object.updateMatrices();
+
+  const newMat = new THREE.Matrix4();
+
+  if (mat === null) {
+    newMat.identity();
+  } else {
+    newMat.multiplyMatrices(mat, object.matrix);
+  }
+
+  if (geometry !== undefined && object.userData.excludeFromBoundingBox !== true) {
+    if (geometry.boundingBox === null) {
+      geometry.computeBoundingBox();
+    }
+
+    _box.copy(geometry.boundingBox);
+    _box.applyMatrix4(newMat);
+
+    bbox.expandByPoint(_box.min);
+    bbox.expandByPoint(_box.max);
+  }
+
+  const children = object.children;
+
+  for (let i = 0, l = children.length; i < l; i++) {
+    expandByObjectSpaceBoundingBox(bbox, children[i], newMat);
+  }
+};
+
+export function expandByEntityObjectSpaceBoundingBox(bbox, el) {
+  const mesh = el.getObject3D("mesh");
+  if (!mesh) return bbox;
+
+  const voxBox = SYSTEMS.voxSystem.getBoundingBoxForSource(mesh, false);
+
+  if (voxBox) {
+    bbox.copy(voxBox);
+    return bbox;
+  }
+
+  const object = el.object3D;
+  object.updateMatrices();
+  expandByObjectSpaceBoundingBox(bbox, object);
+  return bbox;
+}
+
+export function getSpawnInFrontZOffsetForEntity(sourceEntity) {
+  const sourceScale = sourceEntity.object3D.scale;
+
+  const box = new THREE.Box3();
+  const size = new THREE.Vector3();
+
+  expandByEntityObjectSpaceBoundingBox(box, sourceEntity);
+  box.getSize(size);
+
+  const scaledSize = sourceScale.z * Math.min(size.x, size.y, size.z);
+  return Math.min(-1, -2.15 * scaledSize);
+}
+
+export function screenshotSceneCanvas(scene, width, height) {
+  return new Promise(res => {
+    const { externalCameraSystem } = SYSTEMS;
+
+    if (SYSTEMS.externalCameraSystem.isEnabled()) {
+      console.error("cannot take scene screenshot when external camera already enabled");
+      return;
+    }
+
+    scene.addEventListener(
+      "external_camera_added",
+      async () => {
+        for (let i = 0; i < 10; i++) {
+          await nextTick();
+        }
+        const canvas = externalCameraSystem.canvas;
+        const data = canvas.toDataURL();
+        externalCameraSystem.removeExternalCamera();
+        externalCameraSystem.releaseForcedViewingCamera();
+        res(data);
+      },
+      { once: true }
+    );
+
+    externalCameraSystem.enableForcedViewingCamera();
+    externalCameraSystem.addExternalCamera(width, height, true, { preserveDrawingBuffer: true });
+  });
+}
+
+export async function screenshotAndUploadSceneCanvas(scene, width, height) {
+  const { hubChannel } = window.APP;
+
+  const data = await screenshotSceneCanvas(scene, width, height);
+  const blob = dataURItoBlob(data);
+  return await upload(blob, "image/png", hubChannel.hubId);
 }

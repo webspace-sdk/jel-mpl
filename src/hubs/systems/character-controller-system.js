@@ -3,9 +3,14 @@ import { SOUND_SNAP_ROTATE } from "./sound-effects-system";
 import { waitForDOMContentLoaded } from "../utils/async-utils";
 import { childMatch, rotateInPlaceAroundWorldUp, affixToWorldUp, IDENTITY_QUATERNION } from "../utils/three-utils";
 import { getCurrentPlayerHeight } from "../utils/get-current-player-height";
+import { isNextPrevMedia } from "../utils/media-utils";
 //import { m4String } from "../utils/pretty-print";
 import { WORLD_MAX_COORD, WORLD_MIN_COORD, WORLD_SIZE } from "../../jel/systems/terrain-system";
 import qsTruthy from "../utils/qs_truthy";
+const CHARACTER_MAX_Y = 25;
+
+// Largest vertical distance we can just hop up without additional raycasts.
+const MAX_VOX_HOP_SIZE = 1.0;
 
 const calculateDisplacementToDesiredPOV = (function() {
   const translationCoordinateSpace = new THREE.Matrix4();
@@ -40,10 +45,10 @@ const INITIAL_JUMP_VELOCITY = 5.0;
 const isBotMode = qsTruthy("bot_move");
 
 export class CharacterControllerSystem {
-  constructor(scene, terrainSystem) {
+  constructor(scene, terrainSystem, builderSystem) {
     this.scene = scene;
     this.terrainSystem = terrainSystem;
-    this.fly = false;
+    this.fly = builderSystem.enabled;
     this.shouldLandWhenPossible = false;
     this.lastSeenNavVersion = -1;
     this.relativeMotion = new THREE.Vector3(0, 0, 0);
@@ -51,10 +56,17 @@ export class CharacterControllerSystem {
     this.nextRelativeMotion = new THREE.Vector3(0, 0, 0);
     this.dXZ = 0;
     this.movedThisFrame = false;
-    this.jumpStartTime = null;
     this.jumpYVelocity = null;
 
     this.scene.addEventListener("terrain_chunk_loaded", () => {
+      if (!this.fly) {
+        this.shouldLandWhenPossible = true;
+      }
+    });
+
+    builderSystem.addEventListener("enabledchanged", () => {
+      this.fly = builderSystem.enabled;
+
       if (!this.fly) {
         this.shouldLandWhenPossible = true;
       }
@@ -84,6 +96,9 @@ export class CharacterControllerSystem {
   enqueueInPlaceRotationAroundWorldUp(dXZ) {
     this.dXZ += dXZ;
   }
+  shouldFly() {
+    return SYSTEMS.builderSystem.enabled;
+  }
   // We assume the rig is at the root, and its local position === its world position.
   teleportTo = (function() {
     const rig = new THREE.Vector3();
@@ -100,7 +115,7 @@ export class CharacterControllerSystem {
       deltaFromHeadToTargetForHead.copy(targetForHead).sub(head);
       targetForRig.copy(rig).add(deltaFromHeadToTargetForHead);
 
-      this.findPositionOnHeightMap(targetForRig, this.avatarRig.object3D.position, true);
+      this.findGroundedPosition(targetForRig, this.avatarRig.object3D.position, true);
 
       this.avatarRig.object3D.matrixNeedsUpdate = true;
 
@@ -146,15 +161,15 @@ export class CharacterControllerSystem {
     const displacementToDesiredPOV = new THREE.Vector3();
 
     const desiredPOVPosition = new THREE.Vector3();
-    const heightMapSnappedPOVPosition = new THREE.Vector3();
+    const groundSnappedPOVPosition = new THREE.Vector3();
+    const m = new THREE.Matrix4();
     const v = new THREE.Vector3();
+    const v2 = new THREE.Vector3();
+    const q = new THREE.Quaternion();
 
-    let uiRoot;
     return function tick(t, dt) {
       const entered = this.scene.is("entered");
-      uiRoot = uiRoot || document.getElementById("ui-root");
-      const isGhost = !entered && uiRoot && uiRoot.firstChild && uiRoot.firstChild.classList.contains("isGhost");
-      if (!isGhost && !entered) return;
+      if (!entered) return;
       const vrMode = this.scene.is("vr-mode");
       this.sfx = this.sfx || this.scene.systems["hubs-systems"].soundEffectsSystem;
       this.interaction = this.interaction || AFRAME.scenes[0].systems.interaction;
@@ -162,10 +177,17 @@ export class CharacterControllerSystem {
       const userinput = AFRAME.scenes[0].systems.userinput;
       const wasFlying = this.fly;
       const shouldSnapDueToLanding = this.shouldLandWhenPossible;
+      const heldEl = this.interaction.state.rightRemote.held || this.interaction.state.leftRemote.held;
+      // No jumping while holding due to snap. Can't use action bindings for this since when set changes it will trigger a rising.
 
-      const mayJump = SYSTEMS.launcherSystem.enabled;
+      const isHoldingObject = !!heldEl;
+      const mayJump =
+        SYSTEMS.launcherSystem.enabled &&
+        !this.isMotionDisabled &&
+        SYSTEMS.cameraSystem.isInAvatarView() &&
+        !isHoldingObject;
 
-      if (mayJump && userinput.get(paths.actions.jump) && this.jumpYVelocity === null) {
+      if (mayJump && userinput.get(paths.actions.mash) && this.jumpYVelocity === null) {
         this.jumpYVelocity = INITIAL_JUMP_VELOCITY;
       }
 
@@ -205,6 +227,7 @@ export class CharacterControllerSystem {
         this.scene.systems["hubs-systems"].soundEffectsSystem.playSoundOneShot(SOUND_SNAP_ROTATE);
       }
       const characterAcceleration = userinput.get(paths.actions.characterAcceleration);
+      const characterLift = userinput.get(paths.actions.characterLift);
 
       if (isBotMode) {
         // Bot mode keeps moving around
@@ -237,22 +260,35 @@ export class CharacterControllerSystem {
         this.relativeMotionValue = 0;
       }
 
+      this.avatarPOV.object3D.updateMatrices();
+
+      if (this.fly && characterLift) {
+        const hoverEl = this.interaction && this.interaction.state.rightRemote.hovered;
+
+        // Hacky, can't mask out hovering on Q/E'able objects via binding, so do so here.
+        if (!hoverEl || !isNextPrevMedia(hoverEl)) {
+          m.getInverse(this.avatarPOV.object3D.matrixWorld);
+          m.decompose(v2, q, v2);
+          v.set(0, characterLift, 0);
+          v.applyQuaternion(q);
+          this.relativeMotion.add(v);
+        }
+      }
+
       if (this.networkedAvatar) {
         this.networkedAvatar.data.relative_motion = this.relativeMotionValue;
         this.networkedAvatar.data.is_jumping = this.jumpYVelocity !== null && this.jumpYVelocity > 2.5;
       }
 
-      const lerpC = vrMode ? 0 : 0.85; // TODO: To support drifting ("ice skating"), motion needs to keep initial direction
+      const lerpC = vrMode ? 0 : Math.max(0.66, Math.min(0.975, 0.85 * (16.0 / dt))); // TODO: To support drifting ("ice skating"), motion needs to keep initial direction
       this.nextRelativeMotion.copy(this.relativeMotion).multiplyScalar(lerpC);
       this.relativeMotion.multiplyScalar(1 - lerpC);
 
-      this.avatarPOV.object3D.updateMatrices();
+      if (!this.isMotionDisabled && SYSTEMS.cameraSystem.isInAvatarView()) {
+        rotateInPlaceAroundWorldUp(this.avatarPOV.object3D.matrixWorld, this.dXZ, snapRotatedPOV);
 
-      rotateInPlaceAroundWorldUp(this.avatarPOV.object3D.matrixWorld, this.dXZ, snapRotatedPOV);
+        newPOV.copy(snapRotatedPOV);
 
-      newPOV.copy(snapRotatedPOV);
-
-      if (!this.isMotionDisabled) {
         const playerScale = v.setFromMatrixColumn(this.avatarPOV.object3D.matrixWorld, 1).length();
         const triedToMove = this.relativeMotion.lengthSq() > 0.000001;
 
@@ -272,34 +308,28 @@ export class CharacterControllerSystem {
             .multiply(snapRotatedPOV);
         }
 
-        const shouldResnapToHeightMap =
+        const shouldResnapToGround =
           (didStopFlying || shouldSnapDueToLanding || triedToMove) && this.jumpYVelocity === null;
 
-        let squareDistHeightMapCorrection = 0;
+        let squareDistGroundCorrection = 0;
 
-        if (shouldResnapToHeightMap) {
-          this.findPOVPositionAboveHeightMap(
-            desiredPOVPosition.setFromMatrixPosition(newPOV),
-            heightMapSnappedPOVPosition
-          );
-          squareDistHeightMapCorrection = desiredPOVPosition.distanceToSquared(heightMapSnappedPOVPosition);
+        if (shouldResnapToGround) {
+          this.findPOVPositionAboveGround(desiredPOVPosition.setFromMatrixPosition(newPOV), groundSnappedPOVPosition);
 
-          if (this.fly && this.shouldLandWhenPossible && squareDistHeightMapCorrection < 0.5) {
+          squareDistGroundCorrection = desiredPOVPosition.distanceToSquared(groundSnappedPOVPosition);
+
+          if (this.fly && this.shouldLandWhenPossible && squareDistGroundCorrection < 0.5) {
             this.shouldLandWhenPossible = false;
             this.fly = false;
-            newPOV.setPosition(heightMapSnappedPOVPosition);
+            newPOV.setPosition(groundSnappedPOVPosition);
           } else if (!this.fly) {
-            newPOV.setPosition(heightMapSnappedPOVPosition);
+            newPOV.setPosition(groundSnappedPOVPosition);
           }
         }
 
         if (triedToMove) {
-          if (
-            this.fly &&
-            this.shouldLandWhenPossible &&
-            (shouldResnapToHeightMap && squareDistHeightMapCorrection < 3)
-          ) {
-            newPOV.setPosition(heightMapSnappedPOVPosition);
+          if (this.fly && this.shouldLandWhenPossible && (shouldResnapToGround && squareDistGroundCorrection < 3)) {
+            newPOV.setPosition(groundSnappedPOVPosition);
             this.shouldLandWhenPossible = false;
             this.fly = false;
           }
@@ -311,12 +341,14 @@ export class CharacterControllerSystem {
       const newX = newPOV.elements[12];
       const newZ = newPOV.elements[14];
 
+      // Wrap avatar
       if (
         !this.interaction ||
         (!this.interaction.state.rightHand.held &&
           !this.interaction.state.leftHand.held &&
           !this.interaction.state.leftRemote.held &&
-          !this.interaction.state.rightRemote.held)
+          !this.interaction.state.rightRemote.held &&
+          this.terrainSystem.worldTypeWraps())
       ) {
         if (newX > WORLD_MAX_COORD) {
           newPOV.elements[12] = -WORLD_SIZE + newX;
@@ -331,23 +363,30 @@ export class CharacterControllerSystem {
         }
       }
 
+      if (this.fly || this.jumpYVelocity !== null) {
+        this.findPOVPositionAboveGround(
+          desiredPOVPosition.setFromMatrixPosition(newPOV),
+          groundSnappedPOVPosition,
+          true
+        );
+      }
+
       if (this.jumpYVelocity !== null) {
         const dy = (dt / 1000.0) * this.jumpYVelocity;
         this.jumpYVelocity += JUMP_GRAVITY * (dt / 1000.0);
         const newY = newPOV.elements[13] + dy;
 
-        this.findPOVPositionAboveHeightMap(
-          desiredPOVPosition.setFromMatrixPosition(newPOV),
-          heightMapSnappedPOVPosition,
-          true
-        );
-
-        if (newY >= heightMapSnappedPOVPosition.y) {
+        if (newY >= groundSnappedPOVPosition.y) {
           newPOV.elements[13] = newY;
         } else {
-          newPOV.elements[13] = heightMapSnappedPOVPosition.y;
+          newPOV.elements[13] = groundSnappedPOVPosition.y;
           this.jumpYVelocity = null;
         }
+      }
+
+      if (this.fly) {
+        // Clamp y when flying to be above ground and below high in the sky
+        newPOV.elements[13] = Math.max(groundSnappedPOVPosition.y, Math.min(CHARACTER_MAX_Y, newPOV.elements[13]));
       }
 
       childMatch(this.avatarRig.object3D, this.avatarPOV.object3D, newPOV);
@@ -361,32 +400,68 @@ export class CharacterControllerSystem {
     };
   })();
 
-  findPOVPositionAboveHeightMap = (function() {
+  findPOVPositionAboveGround = (function() {
     const desiredFeetPosition = new THREE.Vector3();
     // TODO: Here we assume the player is standing straight up, but in VR it is often the case
     // that you want to lean over the edge of a balcony/table that does not have nav mesh below.
     // We should find way to allow leaning over the edge of a balcony and maybe disallow putting
     // your head through a wall.
-    return function findPOVPositionAboveHeightMap(desiredPOVPosition, outPOVPosition, shouldSnapImmediately) {
+    return function findPOVPositionAboveGround(desiredPOVPosition, outPOVPosition, shouldSnapImmediately) {
       const playerHeight = getCurrentPlayerHeight(true);
       desiredFeetPosition.copy(desiredPOVPosition);
       desiredFeetPosition.y -= playerHeight;
-      this.findPositionOnHeightMap(desiredFeetPosition, outPOVPosition, shouldSnapImmediately);
+      this.findGroundedPosition(desiredFeetPosition, outPOVPosition, shouldSnapImmediately);
       outPOVPosition.y += playerHeight;
       return outPOVPosition;
     };
   })();
 
-  findPositionOnHeightMap(end, outPos, shouldSnapImmediately = false) {
-    const { terrainSystem } = this;
+  findGroundedPosition = (function() {
+    const origin = new THREE.Vector3();
 
-    const newY = terrainSystem.getTerrainHeightAtWorldCoord(end.x, end.z);
+    return function(end, outPos, shouldSnapImmediately = false) {
+      const { terrainSystem } = this;
+      const terrainY = terrainSystem.getTerrainHeightAtWorldCoord(end.x, end.z);
 
-    // Always allow x, z movement, smooth y
-    outPos.x = end.x;
-    outPos.y = shouldSnapImmediately ? newY : 0.15 * newY + 0.85 * end.y;
-    outPos.z = end.z;
-  }
+      let voxFloorY = -Infinity;
+
+      // Check if there is a vox surface to walk along.
+      origin.copy(end);
+      origin.y += MAX_VOX_HOP_SIZE;
+
+      let intersection = SYSTEMS.voxSystem.raycastVerticallyToClosestWalkableSource(origin, false);
+
+      if (intersection !== null) {
+        voxFloorY = intersection.point.y;
+      }
+
+      // Intersect backsides to find floors above us and determine if we need
+      // to jump up to one.
+      intersection = SYSTEMS.voxSystem.raycastVerticallyToClosestWalkableSource(origin, true, true);
+
+      if (intersection !== null) {
+        // Check to see if we should jump up to a higher level.
+        const aboveFloorHeight = intersection.point.y;
+        if (aboveFloorHeight > end.y) {
+          // Check if there is an intermediate ceiling below the floor we may jump to.
+          if (aboveFloorHeight - end.y >= MAX_VOX_HOP_SIZE) {
+            intersection = SYSTEMS.voxSystem.raycastVerticallyToClosestWalkableSource(origin, true);
+            if (intersection === null || intersection.point.y > aboveFloorHeight) {
+              voxFloorY = Math.max(voxFloorY, aboveFloorHeight);
+            }
+          }
+        }
+      }
+
+      const newY = Math.max(terrainY, voxFloorY);
+
+      // Always allow x, z movement, smooth y
+      outPos.x = end.x;
+      outPos.y = shouldSnapImmediately ? newY : 0.15 * newY + 0.85 * end.y;
+
+      outPos.z = end.z;
+    };
+  })();
 
   enableFly(enabled) {
     if (enabled && window.APP.hubChannel && window.APP.hubChannel.can("fly")) {

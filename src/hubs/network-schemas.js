@@ -194,6 +194,26 @@ function registerNetworkSchemas() {
       {
         component: "media-loader",
         property: "createdAt"
+      },
+      {
+        component: "media-loader",
+        property: "locked"
+      },
+      {
+        component: "media-loader",
+        property: "stackAxis"
+      },
+      {
+        component: "media-loader",
+        property: "stackSnapPosition"
+      },
+      {
+        component: "media-loader",
+        property: "stackSnapScale"
+      },
+      {
+        component: "media-pdf",
+        property: "pagable"
       }
     ],
     nonAuthorizedComponents: [

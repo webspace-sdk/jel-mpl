@@ -1,16 +1,22 @@
 import audioForwardWorkletSrc from "../../jel/worklets/audio-forward.worklet.js";
 import vadWorkletSrc from "../../jel/worklets/vad.worklet.js";
 import lipSyncWorker from "../../jel/workers/lipsync.worker.js";
+import sdpTransform from "sdp-transform";
+
+import qsTruthy from "../utils/qs_truthy";
 
 // Built via https://github.com/sipavlovic/wasm2js to load in worklet
 import rnnWasm from "../../jel/wasm/rnnoise-vad-wasm.js";
 const supportsInsertableStreams = !!(window.RTCRtpSender && !!RTCRtpSender.prototype.createEncodedStreams);
 
+const skipLipsync = qsTruthy("skip_lipsync");
+const skipVad = qsTruthy("skip_vad");
+
 export const supportsLipSync = () =>
-  typeof AudioWorklet == "function" && window.SharedArrayBuffer && supportsInsertableStreams;
+  !skipLipsync && typeof AudioWorklet == "function" && window.SharedArrayBuffer && supportsInsertableStreams;
 
 export class AudioSystem {
-  constructor(sceneEl) {
+  constructor(sceneEl, autoQualitySystem) {
     sceneEl.audioListener = sceneEl.audioListener || new THREE.AudioListener();
     if (sceneEl.camera) {
       sceneEl.camera.add(sceneEl.audioListener);
@@ -34,10 +40,6 @@ export class AudioSystem {
     this.aecHackOutboundPeer = null;
     this.aecHackInboundPeer = null;
 
-    if (supportsLipSync()) {
-      this.startLipSync(sceneEl);
-    }
-
     /**
      * Chrome and Safari will start Audio contexts in a "suspended" state.
      * A user interaction (touch/mouse event) is needed in order to resume the AudioContext.
@@ -57,6 +59,13 @@ export class AudioSystem {
 
     document.body.addEventListener("touchend", resume, false);
     document.body.addEventListener("mouseup", resume, false);
+
+    autoQualitySystem.addEventListener("framerate_stable", () => {
+      // Start lip syncing after level loads to avoid hitching.
+      if (supportsLipSync()) {
+        this.startLipSync(sceneEl);
+      }
+    });
   }
 
   disableLipSync() {
@@ -64,9 +73,6 @@ export class AudioSystem {
 
     if (this.lipSyncGain) {
       this.outboundGainNode.disconnect(this.lipSyncGain);
-      this.outboundAnalyser.connect(this.mediaStreamDestinationNode);
-      this.outboundAnalyser.disconnect(this.delayVoiceNode);
-      this.delayVoiceNode.disconnect(this.mediaStreamDestinationNode);
       this.lipSyncForwardingNode.disconnect(this.lipSyncForwardingDestination);
       this.lipSyncHardLimit.disconnect(this.lipSyncVadProcessor);
       this.lipSyncGain.disconnect(this.lipSyncHardLimit);
@@ -81,9 +87,6 @@ export class AudioSystem {
 
     if (this.lipSyncGain) {
       this.outboundGainNode.connect(this.lipSyncGain);
-      this.outboundAnalyser.disconnect(this.mediaStreamDestinationNode);
-      this.outboundAnalyser.connect(this.delayVoiceNode);
-      this.delayVoiceNode.connect(this.mediaStreamDestinationNode);
       this.lipSyncForwardingNode.connect(this.lipSyncForwardingDestination);
       this.lipSyncHardLimit.connect(this.lipSyncVadProcessor);
       this.lipSyncGain.connect(this.lipSyncHardLimit);
@@ -97,8 +100,6 @@ export class AudioSystem {
   startLipSync(sceneEl) {
     // Lip syncing - add gain and compress and then send to forwarding and VAD worklets
     // Create buffers, worklet, VAD detector, and lip sync worker.
-    this.delayVoiceNode = this.audioContext.createDelay();
-    this.delayVoiceNode.delayTime.value = 0.05; // Delay bc of inference
 
     this.lipSyncFeatureBuffer = new SharedArrayBuffer(28 * Float32Array.BYTES_PER_ELEMENT);
     this.lipSyncResultBuffer = new SharedArrayBuffer(1);
@@ -136,7 +137,8 @@ export class AudioSystem {
         this.lipSyncVadProcessor = new AudioWorkletNode(this.audioContext, "vad", {
           processorOptions: {
             vadBuffer: this.lipSyncVadBuffer,
-            rnnWasm
+            rnnWasm,
+            enabled: !skipVad
           }
         });
 
@@ -165,11 +167,11 @@ export class AudioSystem {
 
     if (NAF.connection.adapter) {
       NAF.connection.adapter.setOutgoingVisemeBuffer(this.lipSyncResultData);
-    } else {
-      sceneEl.addEventListener("adapter-ready", () => {
-        NAF.connection.adapter.setOutgoingVisemeBuffer(this.lipSyncResultData);
-      });
     }
+
+    sceneEl.addEventListener("adapter-ready", () => {
+      NAF.connection.adapter.setOutgoingVisemeBuffer(this.lipSyncResultData);
+    });
   }
 
   enableOutboundAudioStream(id) {
@@ -232,6 +234,7 @@ export class AudioSystem {
    *  All audio is now routed through Chrome's audio mixer, thus enabling AEC, while preserving all the audio processing that was performed via the WebAudio API.
    */
   async applyAECHack() {
+    if (qsTruthy("noaechack")) return;
     if (AFRAME.utils.device.isMobile() || !/chrome/i.test(navigator.userAgent)) return;
     this.audioContext = THREE.AudioContext.getContext();
     if (this.audioContext.state !== "running") return;
@@ -280,7 +283,18 @@ export class AudioSystem {
         await this.aecHackInboundPeer.setRemoteDescription(offer);
         if (!this.aecHackOutboundPeer || !this.aecHackInboundPeer) return;
 
+        // Bump opus bitrate and set mono
         const answer = await this.aecHackInboundPeer.createAnswer();
+        const parsedSdp = sdpTransform.parse(answer.sdp);
+        for (let i = 0; i < parsedSdp.media.length; i++) {
+          for (let j = 0; j < parsedSdp.media[i].fmtp.length; j++) {
+            parsedSdp.media[i].fmtp[j].config =
+              parsedSdp.media[i].fmtp[j].config + ";stereo=1;maxaveragebitrate=510000;cbr=0;";
+          }
+        }
+
+        answer.sdp = sdpTransform.write(parsedSdp);
+
         if (!this.aecHackOutboundPeer || !this.aecHackInboundPeer) return;
 
         this.aecHackInboundPeer.setLocalDescription(answer);

@@ -10,6 +10,7 @@ AFRAME.registerSystem("ui-hotkeys", {
 
   tick: function() {
     const canSpawnMedia = window.APP.hubChannel.can("spawn_and_move_media");
+    const isInspecting = SYSTEMS.cameraSystem.isInspecting();
 
     if (!this.userinput) {
       this.userinput = this.el.systems.userinput;
@@ -19,14 +20,14 @@ AFRAME.registerSystem("ui-hotkeys", {
       this.store.update({ settings: { hideKeyTips: !this.store.state.settings.hideKeyTips } });
     }
 
-    if (this.userinput.get(paths.actions.create) && canSpawnMedia) {
+    if (this.userinput.get(paths.actions.create) && canSpawnMedia && !isInspecting) {
       if (this.el.sceneEl.is("entered")) {
         this.el.emit("action_create");
         this.store.handleActivityFlag("createMenu");
       }
     }
 
-    if (this.userinput.get(paths.actions.toggleTriggerMode) && canSpawnMedia) {
+    if (this.userinput.get(paths.actions.toggleTriggerMode) && canSpawnMedia && !isInspecting) {
       SYSTEMS.builderSystem.toggle();
       SYSTEMS.launcherSystem.toggle();
     }
@@ -38,6 +39,12 @@ AFRAME.registerSystem("ui-hotkeys", {
     }
 
     let slotToEquip = 0;
+
+    if (this.userinput.get(paths.actions.undo)) {
+      SYSTEMS.undoSystem.doUndo();
+    } else if (this.userinput.get(paths.actions.redo)) {
+      SYSTEMS.undoSystem.doRedo();
+    }
 
     if (this.userinput.get(paths.actions.equip1)) {
       slotToEquip = 1;

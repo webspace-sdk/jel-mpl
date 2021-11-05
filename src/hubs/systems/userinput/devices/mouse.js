@@ -42,6 +42,7 @@ export class MouseDevice {
     });
     ["mousedown", "wheel"].map(x => canvas.addEventListener(x, queueEvent, { passive: false }));
     ["mousemove", "mouseup"].map(x => window.addEventListener(x, queueEvent, { passive: false }));
+    document.addEventListener("dragover", queueEvent, { passive: false });
 
     document.addEventListener(
       "wheel",
@@ -70,6 +71,10 @@ export class MouseDevice {
     this.coords[1] = -(event.clientY / window.innerHeight) * 2 + 1;
     this.movementXY[0] += event.movementX;
     this.movementXY[1] += event.movementY;
+    this.altKey = event.altKey;
+    this.ctrlKey = event.ctrlKey;
+    this.metaKey = event.metaKey;
+    this.shiftKey = event.shiftKey;
     if (event.type === "mousedown" && left) {
       this.mouseDownLeftThisFrame = true;
       this.buttonLeft = true;
@@ -108,6 +113,8 @@ export class MouseDevice {
     this.mouseDownRightThisFrame = false;
     this.mouseDownMiddleThisFrame = false;
 
+    const shouldWriteModifierKeys = this.events.length > 0;
+
     for (let i = 0; i < this.events.length; i++) {
       const event = this.events[i];
       if (!this.process(event)) {
@@ -115,6 +122,13 @@ export class MouseDevice {
         this.events.splice(0, i);
         break;
       }
+    }
+
+    if (shouldWriteModifierKeys) {
+      frame.setValueType(paths.device.keyboard.key("control"), this.ctrlKey);
+      frame.setValueType(paths.device.keyboard.key("alt"), this.altKey);
+      frame.setValueType(paths.device.keyboard.key("meta"), this.metaKey);
+      frame.setValueType(paths.device.keyboard.key("shift"), this.shiftKey);
     }
 
     if (!this.didStopProcessingEarly) {

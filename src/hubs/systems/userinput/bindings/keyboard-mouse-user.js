@@ -22,11 +22,14 @@ const notControlSpace = "/vars/mouse-and-keyboard/notControlSpace";
 
 const qs = new URLSearchParams(location.search);
 const inspectZoomSpeed = parseFloat(qs.get("izs")) || -10.0;
-const controlSpace = "/var/control+space";
 const controlM = "/var/control+m";
 const movementX = "/var/movementX";
 const movementY = "/var/movementY";
-const middleMouseMoveY = "/var/middle-mouse-move-y";
+const inspectPanning = "/var/inspect-pan";
+const panX = "/var/middle-mouse-move-x";
+const panY = "/var/middle-mouse-move-y";
+const rightMouseMoveX = "/var/right-mouse-move-x";
+const rightMouseMoveY = "/var/right-mouse-move-y";
 const cursorScalePenTipWheel = "/var/cursorScalePenTipWheel";
 
 const kMap = new Map();
@@ -53,6 +56,14 @@ export const keyboardMouseUserBindings = addSetsToBindings({
       src: {},
       dest: { value: paths.actions.cursor.left.wake },
       xform: xforms.always(false)
+    },
+    {
+      src: {
+        q: paths.device.keyboard.code("keyq"),
+        e: paths.device.keyboard.code("keye")
+      },
+      dest: { scalar: paths.actions.characterLift },
+      xform: xforms.qe_to_scalar
     },
     {
       src: {
@@ -132,18 +143,17 @@ export const keyboardMouseUserBindings = addSetsToBindings({
       src: {
         value: notControlSpace
       },
-      dest: { value: paths.actions.jump },
+      dest: { value: paths.actions.mash },
       priority: 1001,
       xform: xforms.rising
     },
     {
       src: {
-        bool: paths.device.keyboard.key("control"),
-        value: paths.device.keyboard.key(" ")
+        value: notControlSpace
       },
-      dest: { value: controlSpace },
+      dest: { value: paths.actions.mashRelease },
       priority: 1001,
-      xform: xforms.copyIfTrue
+      xform: xforms.falling
     },
     {
       src: {
@@ -165,7 +175,7 @@ export const keyboardMouseUserBindings = addSetsToBindings({
     },
     {
       src: {
-        value: paths.device.keyboard.code("keyl")
+        value: paths.device.keyboard.code("keyp")
       },
       dest: {
         value: paths.actions.logDebugFrame
@@ -275,6 +285,21 @@ export const keyboardMouseUserBindings = addSetsToBindings({
       priority: 1001
     },
     {
+      src: { value: paths.device.keyboard.code("keyl") },
+      dest: { value: "/var/rising+l" },
+      xform: xforms.rising,
+      priority: 1001
+    },
+    {
+      src: {
+        bool: paths.device.keyboard.key("alt"),
+        value: "/var/rising+l"
+      },
+      dest: { value: "/var/naked+l" },
+      xform: xforms.copyIfFalse,
+      priority: 1001
+    },
+    {
       src: {
         bool: paths.device.keyboard.key("alt"),
         value: paths.device.keyboard.code("keyr")
@@ -296,6 +321,75 @@ export const keyboardMouseUserBindings = addSetsToBindings({
       },
       dest: { value: "/var/naked+g" },
       xform: xforms.copyIfFalse,
+      priority: 1001
+    },
+    {
+      src: { value: paths.device.keyboard.code("keyz") },
+      dest: { value: "/var/rising+z" },
+      xform: xforms.rising,
+      priority: 1001
+    },
+    {
+      src: {
+        bool: paths.device.keyboard.key("alt"),
+        value: "/var/rising+z"
+      },
+      dest: { value: "/var/rising+z+noalt" },
+      xform: xforms.copyIfFalse,
+      priority: 1001
+    },
+    {
+      src: {
+        bool: paths.device.keyboard.key("control"),
+        value: "/var/rising+z+noalt"
+      },
+      dest: { value: "/var/naked+z" },
+      xform: xforms.copyIfFalse,
+      priority: 1001
+    }, // ctrl+Z and alt+z both bound, so need extra element
+    {
+      src: {
+        bool: paths.device.keyboard.key("control"),
+        value: paths.device.keyboard.code("keyz")
+      },
+      dest: { value: "/var/control+z" },
+      xform: xforms.copyIfTrue,
+      priority: 1001
+    }, // ctrl+Z and alt+z both bound, so need extra element
+    {
+      src: { value: "/var/control+z" },
+      dest: { value: paths.actions.undo },
+      xform: xforms.rising,
+      priority: 1001
+    },
+    {
+      src: { value: paths.device.keyboard.code("keyy") },
+      dest: { value: "/var/rising+y" },
+      xform: xforms.rising,
+      priority: 1001
+    },
+    {
+      src: {
+        bool: paths.device.keyboard.key("control"),
+        value: "/var/rising+y"
+      },
+      dest: { value: "/var/naked+y" },
+      xform: xforms.copyIfFalse,
+      priority: 1001
+    },
+    {
+      src: {
+        bool: paths.device.keyboard.key("control"),
+        value: paths.device.keyboard.code("keyy")
+      },
+      dest: { value: "/var/control+y" },
+      xform: xforms.copyIfTrue,
+      priority: 1001
+    },
+    {
+      src: { value: "/var/control+y" },
+      dest: { value: paths.actions.redo },
+      xform: xforms.rising,
       priority: 1001
     },
     {
@@ -516,15 +610,6 @@ export const keyboardMouseUserBindings = addSetsToBindings({
       xform: xforms.any
     },
     {
-      src: {
-        bool: paths.device.keyboard.key("control"),
-        value: paths.device.keyboard.code("keyz")
-      },
-      dest: { value: paths.actions.cursor.right.undoDrawing },
-      priority: 1001,
-      xform: xforms.rising
-    },
-    {
       src: { value: togglePen },
       dest: { value: paths.actions.cursor.right.drop },
       xform: xforms.rising,
@@ -605,19 +690,33 @@ export const keyboardMouseUserBindings = addSetsToBindings({
       priority: 2
     },
     {
-      src: { value: paths.device.keyboard.code("keyq") },
-      dest: { value: paths.actions.prevGuidePlaneMode },
-      xform: xforms.rising
-    },
-    {
-      src: { value: paths.device.keyboard.code("keye") },
-      dest: { value: paths.actions.nextGuidePlaneMode },
-      xform: xforms.rising
-    },
-    {
       src: [dropViaMouse, dropViaKeyboard],
       dest: { value: paths.actions.cursor.right.drop },
       xform: xforms.any,
+      priority: 201
+    },
+    {
+      src: { value: paths.device.keyboard.code("keyq") },
+      dest: { value: paths.actions.mediaSlideAction },
+      xform: xforms.copy,
+      priority: 201
+    },
+    {
+      src: { value: paths.device.keyboard.code("keyq") },
+      dest: { value: paths.actions.mediaSlideReleaseAction },
+      xform: xforms.falling,
+      priority: 201
+    },
+    {
+      src: { value: paths.device.keyboard.code("keye") },
+      dest: { value: paths.actions.mediaLiftAction },
+      xform: xforms.copy,
+      priority: 201
+    },
+    {
+      src: { value: paths.device.keyboard.code("keye") },
+      dest: { value: paths.actions.mediaLiftReleaseAction },
+      xform: xforms.falling,
       priority: 201
     }
   ],
@@ -676,12 +775,6 @@ export const keyboardMouseUserBindings = addSetsToBindings({
       priority: 1001
     },
     {
-      src: { value: controlSpace },
-      dest: { value: paths.actions.mediaPrimaryAction },
-      xform: xforms.rising,
-      priority: 201
-    },
-    {
       src: { value: paths.device.keyboard.code("keyo") },
       dest: { value: paths.actions.mediaOpenAction },
       xform: xforms.rising,
@@ -723,7 +816,7 @@ export const keyboardMouseUserBindings = addSetsToBindings({
     },
     {
       src: { value: "/var/naked+g" },
-      dest: { value: paths.actions.mediaDownAction },
+      dest: { value: paths.actions.mediaDownOrResetAction },
       xform: xforms.rising,
       priority: 1001
     },
@@ -757,6 +850,12 @@ export const keyboardMouseUserBindings = addSetsToBindings({
       priority: 1001
     },
     {
+      src: { value: "/var/naked+l" },
+      dest: { value: paths.actions.mediaToggleLockAction },
+      xform: xforms.rising,
+      priority: 1001
+    },
+    {
       src: { value: paths.device.mouse.wheel },
       dest: { value: paths.actions.cursor.right.mediaScroll },
       xform: xforms.scale(-0.3),
@@ -769,12 +868,6 @@ export const keyboardMouseUserBindings = addSetsToBindings({
       dest: { value: paths.actions.cursor.right.mediaVolumeMod },
       xform: xforms.scale(-0.3),
       priority: 1
-    },
-    {
-      src: { value: controlSpace },
-      dest: { value: paths.actions.mediaPrimaryAction },
-      xform: xforms.rising,
-      priority: 201
     },
     {
       src: { value: paths.device.keyboard.code("keyo") },
@@ -806,7 +899,7 @@ export const keyboardMouseUserBindings = addSetsToBindings({
     },
     {
       src: { value: "/var/naked+g" },
-      dest: { value: paths.actions.mediaDownAction },
+      dest: { value: paths.actions.mediaDownOrResetAction },
       xform: xforms.rising,
       priority: 1001
     },
@@ -828,8 +921,13 @@ export const keyboardMouseUserBindings = addSetsToBindings({
       xform: xforms.rising
     },
     {
-      src: { value: paths.device.keyboard.code("keyc") },
+      src: { value: "/var/naked+c" },
       dest: { value: paths.actions.mediaCloneAction },
+      xform: xforms.rising
+    },
+    {
+      src: { value: "/var/naked+l" },
+      dest: { value: paths.actions.mediaToggleLockAction },
       xform: xforms.rising
     }
   ],
@@ -878,27 +976,61 @@ export const keyboardMouseUserBindings = addSetsToBindings({
       xform: xforms.split_vec2
     },
     {
-      src: { bool: paths.device.mouse.buttonMiddle, value: movementY },
-      dest: { value: middleMouseMoveY },
-      xform: xforms.copyIfTrue
+      src: [paths.device.mouse.buttonMiddle, paths.device.keyboard.key(" ")],
+      dest: { value: inspectPanning },
+      xform: xforms.any,
+      priority: 2001
     },
     {
-      src: { value: middleMouseMoveY },
+      src: { bool: inspectPanning, value: movementX },
+      dest: { value: panX },
+      xform: xforms.copyIfTrue,
+      priority: 2001
+    },
+    {
+      src: { bool: inspectPanning, value: movementY },
+      dest: { value: panY },
+      xform: xforms.copyIfTrue,
+      priority: 2001
+    },
+    {
+      src: { bool: paths.device.mouse.buttonRight, value: movementX },
+      dest: { value: rightMouseMoveX },
+      xform: xforms.copyIfTrue,
+      priority: 2001
+    },
+    {
+      src: { bool: paths.device.mouse.buttonRight, value: movementY },
+      dest: { value: rightMouseMoveY },
+      xform: xforms.copyIfTrue,
+      priority: 2001
+    },
+    {
+      src: { value: panX },
+      dest: { value: paths.actions.inspectPanX },
+      xform: xforms.scale(0.001),
+      priority: 2001
+    },
+    {
+      src: { value: panY },
       dest: { value: paths.actions.inspectPanY },
-      xform: xforms.scale(0.001)
+      xform: xforms.scale(0.001),
+      priority: 2001
+    },
+    {
+      src: { value: rightMouseMoveX },
+      dest: { value: paths.actions.inspectRotateX },
+      xform: xforms.scale(0.002),
+      priority: 2001
+    },
+    {
+      src: { value: rightMouseMoveY },
+      dest: { value: paths.actions.inspectRotateY },
+      xform: xforms.scale(0.002),
+      priority: 2001
     }
   ],
   [sets.transforming]: [
-    {
-      src: { value: paths.device.keyboard.code("keyq") },
-      dest: { value: paths.actions.prevGuidePlaneMode },
-      xform: xforms.rising
-    },
-    {
-      src: { value: paths.device.keyboard.code("keye") },
-      dest: { value: paths.actions.nextGuidePlaneMode },
-      xform: xforms.rising
-    },
     {
       src: { value: paths.device.keyboard.key("control") },
       dest: { value: paths.actions.transformModifier },
@@ -909,6 +1041,30 @@ export const keyboardMouseUserBindings = addSetsToBindings({
       src: { value: paths.device.mouse.wheel },
       dest: { value: paths.actions.transformScroll },
       xform: xforms.copy,
+      priority: 1001
+    },
+    {
+      src: { value: paths.device.keyboard.code("keyq") },
+      dest: { value: paths.actions.transformRotatePrevAction },
+      xform: xforms.rising,
+      priority: 1001
+    },
+    {
+      src: { value: paths.device.keyboard.code("keye") },
+      dest: { value: paths.actions.transformRotateNextAction },
+      xform: xforms.rising,
+      priority: 1001
+    },
+    {
+      src: { value: paths.device.keyboard.code("keyg") },
+      dest: { value: paths.actions.transformAxisPrevAction },
+      xform: xforms.rising,
+      priority: 1001
+    },
+    {
+      src: { value: paths.device.keyboard.code("keyt") },
+      dest: { value: paths.actions.transformAxisNextAction },
+      xform: xforms.rising,
       priority: 1001
     }
   ],
